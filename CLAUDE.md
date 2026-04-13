@@ -34,19 +34,3 @@ make docker-buildx      # Multi-platform build (amd64, arm64)
 1. **ext_proc Server** (`internal/extproc/`) - Envoy External Processing gRPC protocol, currently passthrough mode
 2. **MCP Parser** (planned) - Parse Model Context Protocol messages
 3. **Provider Interface** (planned) - Extensible interface for guardrail providers
-
-**Configuration:**
-- `--addr` :9001 (gRPC ext_proc server)
-- `--health-addr` :8080 (HTTP health check)
-
-## File Structure
-
-```
-cmd/adapter/main.go              # Entry point, server initialization
-internal/extproc/
-  server.go                      # ext_proc protocol implementation
-  server_test.go                 # Unit tests
-.github/workflows/               # CI/CD (lint, test, publish)
-.golangci.yml                    # Linter configuration
-Makefile                         # Build automation
-```
