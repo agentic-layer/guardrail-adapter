@@ -22,10 +22,15 @@ type Result struct {
 	MaskedText string
 	// Reason is a human-readable reason for blocking, populated when Action == ActionBlock.
 	Reason string
+	// AnonymizationMetadata stores metadata needed to deanonymize masked text.
+	// Only populated when Action == ActionMask.
+	AnonymizationMetadata interface{}
 }
 
 // GuardrailProvider is the interface for inspecting text and applying guardrails.
 type GuardrailProvider interface {
 	// Inspect analyzes the provided text and returns the action to take.
 	Inspect(ctx context.Context, text string) (*Result, error)
+	// Deanonymize restores masked text to its original form using anonymization metadata.
+	Deanonymize(ctx context.Context, maskedText string, metadata interface{}) (string, error)
 }

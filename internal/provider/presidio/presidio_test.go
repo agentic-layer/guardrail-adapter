@@ -527,3 +527,105 @@ func TestPresidioProvider_determineAction(t *testing.T) {
 		})
 	}
 }
+
+func TestPresidioProvider_Deanonymize(t *testing.T) {
+	tests := []struct {
+		name           string
+		maskedText     string
+		metadata       interface{}
+		expectedResult string
+		expectError    bool
+	}{
+		{
+			name:       "successful deanonymization",
+			maskedText: "<PERSON> works at <ORGANIZATION>",
+			metadata: []anonymizeResponseItem{
+				{Start: 0, End: 8, EntityType: "PERSON", Text: "John Doe", Operator: "replace"},
+				{Start: 18, End: 32, EntityType: "ORGANIZATION", Text: "Acme Corp", Operator: "replace"},
+			},
+			expectedResult: "John Doe works at Acme Corp",
+			expectError:    false,
+		},
+		{
+			name:           "empty metadata - return as-is",
+			maskedText:     "No masked content",
+			metadata:       []anonymizeResponseItem{},
+			expectedResult: "No masked content",
+			expectError:    false,
+		},
+		{
+			name:        "invalid metadata type",
+			maskedText:  "some text",
+			metadata:    "invalid",
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create mock Presidio server for deanonymize endpoint
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/deanonymize" {
+					var reqBody deanonymizeRequest
+					if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+						t.Errorf("Failed to decode deanonymize request: %v", err)
+					}
+
+					// Mock deanonymize response - restore original text
+					// For testing purposes, use the Text field from entities as the restoration value
+					restoredText := reqBody.Text
+					runes := []rune(restoredText)
+
+					// Sort entities by start position in descending order
+					entities := make([]deanonymizeEntity, len(reqBody.Entities))
+					copy(entities, reqBody.Entities)
+					for i := len(entities) - 1; i >= 0; i-- {
+						for j := i - 1; j >= 0; j-- {
+							if entities[j].Start < entities[i].Start {
+								entities[j], entities[i] = entities[i], entities[j]
+							}
+						}
+					}
+
+					// Replace placeholders with original text
+					for _, entity := range entities {
+						originalText := entity.Text
+						runes = append(runes[:entity.Start], append([]rune(originalText), runes[entity.End:]...)...)
+					}
+
+					resp := deanonymizeResponse{
+						Text: string(runes),
+					}
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(resp)
+				}
+			}))
+			defer server.Close()
+
+			p := &Provider{
+				config: Config{
+					Endpoint: server.URL,
+				},
+				httpClient: &http.Client{},
+			}
+
+			result, err := p.Deanonymize(context.Background(), tt.maskedText, tt.metadata)
+
+			if tt.expectError {
+				if err == nil {
+					t.Error("Expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
+			}
+
+			if result != tt.expectedResult {
+				t.Errorf("Expected result %q, got %q", tt.expectedResult, result)
+			}
+		})
+	}
+}

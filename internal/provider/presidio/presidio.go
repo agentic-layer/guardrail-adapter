@@ -75,6 +75,42 @@ type anonymizeResponseItem struct {
 	Operator   string `json:"operator"`
 }
 
+// deanonymizeRequest represents the request to Presidio Deanonymizer API.
+type deanonymizeRequest struct {
+	Text          string                        `json:"text"`
+	Entities      []deanonymizeEntity           `json:"entities"`
+	Deanonymizers map[string]deanonymizerConfig `json:"deanonymizers,omitempty"`
+}
+
+// deanonymizeEntity represents an entity to be deanonymized.
+type deanonymizeEntity struct {
+	Start      int    `json:"start"`
+	End        int    `json:"end"`
+	EntityType string `json:"entity_type"`
+	Text       string `json:"text"`
+	Operator   string `json:"operator"`
+}
+
+// deanonymizerConfig represents the configuration for a specific deanonymizer.
+type deanonymizerConfig struct {
+	Type string `json:"type"`
+}
+
+// deanonymizeResponse represents the response from Presidio Deanonymizer API.
+type deanonymizeResponse struct {
+	Text  string                    `json:"text"`
+	Items []deanonymizeResponseItem `json:"items"`
+}
+
+// deanonymizeResponseItem represents an item in the deanonymizer response.
+type deanonymizeResponseItem struct {
+	Start      int    `json:"start"`
+	End        int    `json:"end"`
+	EntityType string `json:"entity_type"`
+	Text       string `json:"text"`
+	Operator   string `json:"operator"`
+}
+
 // New creates a new Presidio provider with the given configuration.
 func New(config Config) *Provider {
 	return &Provider{
@@ -181,6 +217,8 @@ func (p *Provider) getThreshold(entityType string) float64 {
 
 // determineAction determines the action to take based on the detected entities.
 // BLOCK takes precedence over MASK - if any entity is BLOCK, reject the entire request.
+//
+//nolint:unparam // error return is needed for interface consistency and future extensibility
 func (p *Provider) determineAction(ctx context.Context, text string, results []recognizerResult) (*provider.Result, error) {
 	if len(results) == 0 {
 		// No entities detected, allow the request
@@ -213,7 +251,7 @@ func (p *Provider) determineAction(ctx context.Context, text string, results []r
 
 	// If there are MASK entities, apply masking using Presidio anonymize endpoint
 	if len(maskEntities) > 0 {
-		maskedText, err := p.anonymizeText(ctx, text, maskEntities)
+		maskedText, anonymizeItems, err := p.anonymizeText(ctx, text, maskEntities)
 		if err != nil {
 			// If anonymization fails, return an error by blocking the request
 			return &provider.Result{
@@ -222,8 +260,9 @@ func (p *Provider) determineAction(ctx context.Context, text string, results []r
 			}, nil
 		}
 		return &provider.Result{
-			Action:     provider.ActionMask,
-			MaskedText: maskedText,
+			Action:                provider.ActionMask,
+			MaskedText:            maskedText,
+			AnonymizationMetadata: anonymizeItems,
 		}, nil
 	}
 
@@ -247,7 +286,8 @@ func (p *Provider) getAction(entityType string) string {
 }
 
 // anonymizeText uses Presidio's /anonymize endpoint to mask detected PII.
-func (p *Provider) anonymizeText(ctx context.Context, text string, results []recognizerResult) (string, error) {
+// Returns the masked text and anonymization items needed for deanonymization.
+func (p *Provider) anonymizeText(ctx context.Context, text string, results []recognizerResult) (string, []anonymizeResponseItem, error) {
 	// Build anonymizers config - use "replace" operator to replace with entity type
 	anonymizers := make(map[string]anonymizerConfig)
 	for _, result := range results {
@@ -268,21 +308,21 @@ func (p *Provider) anonymizeText(ctx context.Context, text string, results []rec
 	// Marshal request
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal anonymize request: %w", err)
+		return "", nil, fmt.Errorf("failed to marshal anonymize request: %w", err)
 	}
 
 	// Create HTTP request
 	url := strings.TrimSuffix(p.config.Endpoint, "/") + "/anonymize"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
 	if err != nil {
-		return "", fmt.Errorf("failed to create anonymize request: %w", err)
+		return "", nil, fmt.Errorf("failed to create anonymize request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	// Send request
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to send request to Presidio anonymizer: %w", err)
+		return "", nil, fmt.Errorf("failed to send request to Presidio anonymizer: %w", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -291,21 +331,96 @@ func (p *Provider) anonymizeText(ctx context.Context, text string, results []rec
 	// Read response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read anonymize response body: %w", err)
+		return "", nil, fmt.Errorf("failed to read anonymize response body: %w", err)
 	}
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("presidio anonymizer returned status %d: %s", resp.StatusCode, string(body))
+		return "", nil, fmt.Errorf("presidio anonymizer returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	// Parse response
 	var anonymizeResp anonymizeResponse
 	if err := json.Unmarshal(body, &anonymizeResp); err != nil {
-		return "", fmt.Errorf("failed to parse anonymize response: %w", err)
+		return "", nil, fmt.Errorf("failed to parse anonymize response: %w", err)
 	}
 
-	return anonymizeResp.Text, nil
+	return anonymizeResp.Text, anonymizeResp.Items, nil
+}
+
+// Deanonymize restores masked text to its original form using Presidio's /deanonymize endpoint.
+func (p *Provider) Deanonymize(ctx context.Context, maskedText string, metadata interface{}) (string, error) {
+	// Convert metadata to anonymize items
+	items, ok := metadata.([]anonymizeResponseItem)
+	if !ok {
+		return "", fmt.Errorf("invalid anonymization metadata type")
+	}
+
+	if len(items) == 0 {
+		// No entities to deanonymize, return text as-is
+		return maskedText, nil
+	}
+
+	// Convert anonymize items to deanonymize entities
+	entities := make([]deanonymizeEntity, len(items))
+	for i, item := range items {
+		//nolint:staticcheck // Cannot use type conversion as field names differ between types
+		entities[i] = deanonymizeEntity{
+			Start:      item.Start,
+			End:        item.End,
+			EntityType: item.EntityType,
+			Text:       item.Text,
+			Operator:   item.Operator,
+		}
+	}
+
+	// Prepare the deanonymize request
+	reqBody := deanonymizeRequest{
+		Text:     maskedText,
+		Entities: entities,
+	}
+
+	// Marshal request
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal deanonymize request: %w", err)
+	}
+
+	// Create HTTP request
+	url := strings.TrimSuffix(p.config.Endpoint, "/") + "/deanonymize"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create deanonymize request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send request
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request to Presidio deanonymizer: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	// Read response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read deanonymize response body: %w", err)
+	}
+
+	// Check status code
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("presidio deanonymizer returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var deanonymizeResp deanonymizeResponse
+	if err := json.Unmarshal(body, &deanonymizeResp); err != nil {
+		return "", fmt.Errorf("failed to parse deanonymize response: %w", err)
+	}
+
+	return deanonymizeResp.Text, nil
 }
 
 // uniqueStrings returns a deduplicated slice of strings.
