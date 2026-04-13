@@ -5,9 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
-
-	"github.com/agentic-layer/guardrail-adapter/internal/provider"
 )
 
 func TestPresidioProvider_ProcessRequest(t *testing.T) {
@@ -17,10 +16,9 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 		text           string
 		mockResponse   []recognizerResult
 		mockStatusCode int
-		expectedAction provider.Action
-		expectedMasked string
-		expectedReason string
+		expectedText   string
 		expectError    bool
+		errorContains  string
 	}{
 		{
 			name: "no entities detected - allow",
@@ -30,7 +28,7 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 			text:           "This is a safe text",
 			mockResponse:   []recognizerResult{},
 			mockStatusCode: http.StatusOK,
-			expectedAction: provider.ActionAllow,
+			expectedText:   "This is a safe text",
 		},
 		{
 			name: "PERSON entity below threshold - allow",
@@ -45,7 +43,7 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 				{EntityType: "PERSON", Start: 0, End: 8, Score: 0.7},
 			},
 			mockStatusCode: http.StatusOK,
-			expectedAction: provider.ActionAllow,
+			expectedText:   "John Doe",
 		},
 		{
 			name: "PERSON entity above threshold - mask",
@@ -63,8 +61,7 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 				{EntityType: "PERSON", Start: 0, End: 8, Score: 0.9},
 			},
 			mockStatusCode: http.StatusOK,
-			expectedAction: provider.ActionMask,
-			expectedMasked: "<PERSON> works here",
+			expectedText:   "<PERSON> works here",
 		},
 		{
 			name: "CREDIT_CARD detected - block",
@@ -79,8 +76,8 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 				{EntityType: "CREDIT_CARD", Start: 12, End: 31, Score: 0.95},
 			},
 			mockStatusCode: http.StatusOK,
-			expectedAction: provider.ActionBlock,
-			expectedReason: "Detected blocked entities: CREDIT_CARD",
+			expectError:    true,
+			errorContains:  "CREDIT_CARD",
 		},
 		{
 			name: "Multiple entities - BLOCK takes precedence",
@@ -97,8 +94,8 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 				{EntityType: "CREDIT_CARD", Start: 18, End: 37, Score: 0.95},
 			},
 			mockStatusCode: http.StatusOK,
-			expectedAction: provider.ActionBlock,
-			expectedReason: "Detected blocked entities: CREDIT_CARD",
+			expectError:    true,
+			errorContains:  "CREDIT_CARD",
 		},
 		{
 			name: "Multiple MASK entities",
@@ -115,8 +112,7 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 				{EntityType: "EMAIL", Start: 20, End: 36, Score: 0.95},
 			},
 			mockStatusCode: http.StatusOK,
-			expectedAction: provider.ActionMask,
-			expectedMasked: "Contact <PERSON> at <EMAIL>",
+			expectedText:   "Contact <PERSON> at <EMAIL>",
 		},
 		{
 			name: "ALL threshold applies to unspecified entity",
@@ -134,7 +130,7 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 				{EntityType: "PHONE_NUMBER", Start: 5, End: 13, Score: 0.7},
 			},
 			mockStatusCode: http.StatusOK,
-			expectedAction: provider.ActionAllow, // Below ALL threshold
+			expectedText:   "Call 555-1234", // Below ALL threshold
 		},
 		{
 			name: "Per-entity threshold overrides ALL",
@@ -153,7 +149,7 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 				{EntityType: "PERSON", Start: 0, End: 8, Score: 0.7},
 			},
 			mockStatusCode: http.StatusOK,
-			expectedAction: provider.ActionAllow, // Below PERSON threshold
+			expectedText:   "John Doe", // Below PERSON threshold
 		},
 		{
 			name: "ALL action applies to unspecified entity",
@@ -168,8 +164,8 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 				{EntityType: "UNKNOWN_ENTITY", Start: 0, End: 8, Score: 0.9},
 			},
 			mockStatusCode: http.StatusOK,
-			expectedAction: provider.ActionBlock,
-			expectedReason: "Detected blocked entities: UNKNOWN_ENTITY",
+			expectError:    true,
+			errorContains:  "UNKNOWN_ENTITY",
 		},
 		{
 			name: "Presidio error - non-200 status",
@@ -193,8 +189,7 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 				{EntityType: "PERSON", Start: 8, End: 10, Score: 0.9},
 			},
 			mockStatusCode: http.StatusOK,
-			expectedAction: provider.ActionMask,
-			expectedMasked: "Contact <PERSON> today",
+			expectedText:   "Contact <PERSON> today",
 		},
 		{
 			name: "EntityActions filters requested entities",
@@ -210,8 +205,7 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 				{EntityType: "PERSON", Start: 0, End: 4, Score: 0.9},
 			},
 			mockStatusCode: http.StatusOK,
-			expectedAction: provider.ActionMask,
-			expectedMasked: "<PERSON>",
+			expectedText:   "<PERSON>",
 		},
 	}
 
@@ -321,6 +315,8 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 			if tt.expectError {
 				if err == nil {
 					t.Error("Expected error, got nil")
+				} else if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error to contain %q, got %q", tt.errorContains, err.Error())
 				}
 				return
 			}
@@ -330,14 +326,8 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 			}
 
 			// Verify result
-			if result.Action != tt.expectedAction {
-				t.Errorf("Expected action %s, got %s", tt.expectedAction, result.Action)
-			}
-			if tt.expectedMasked != "" && result.MaskedText != tt.expectedMasked {
-				t.Errorf("Expected masked text %q, got %q", tt.expectedMasked, result.MaskedText)
-			}
-			if tt.expectedReason != "" && result.Reason != tt.expectedReason {
-				t.Errorf("Expected reason %q, got %q", tt.expectedReason, result.Reason)
+			if tt.expectedText != "" && result.Text != tt.expectedText {
+				t.Errorf("Expected text %q, got %q", tt.expectedText, result.Text)
 			}
 		})
 	}
@@ -401,18 +391,20 @@ func TestPresidioProvider_filterByThreshold(t *testing.T) {
 
 func TestPresidioProvider_determineAction(t *testing.T) {
 	tests := []struct {
-		name           string
-		text           string
-		entityActions  map[string]string
-		results        []recognizerResult
-		expectedAction provider.Action
+		name          string
+		text          string
+		entityActions map[string]string
+		results       []recognizerResult
+		expectedText  string
+		expectError   bool
+		errorContains string
 	}{
 		{
-			name:           "no results - allow",
-			text:           "test text",
-			entityActions:  map[string]string{},
-			results:        []recognizerResult{},
-			expectedAction: provider.ActionAllow,
+			name:          "no results - allow",
+			text:          "test text",
+			entityActions: map[string]string{},
+			results:       []recognizerResult{},
+			expectedText:  "test text",
 		},
 		{
 			name: "BLOCK entity present - block",
@@ -423,7 +415,8 @@ func TestPresidioProvider_determineAction(t *testing.T) {
 			results: []recognizerResult{
 				{EntityType: "CREDIT_CARD", Start: 0, End: 10},
 			},
-			expectedAction: provider.ActionBlock,
+			expectError:   true,
+			errorContains: "CREDIT_CARD",
 		},
 		{
 			name: "MASK entity present - mask",
@@ -434,7 +427,7 @@ func TestPresidioProvider_determineAction(t *testing.T) {
 			results: []recognizerResult{
 				{EntityType: "PERSON", Start: 0, End: 10},
 			},
-			expectedAction: provider.ActionMask,
+			expectedText: "<PERSON>here",
 		},
 		{
 			name: "Both BLOCK and MASK - BLOCK takes precedence",
@@ -447,7 +440,8 @@ func TestPresidioProvider_determineAction(t *testing.T) {
 				{EntityType: "PERSON", Start: 0, End: 10},
 				{EntityType: "CREDIT_CARD", Start: 15, End: 24},
 			},
-			expectedAction: provider.ActionBlock,
+			expectError:   true,
+			errorContains: "CREDIT_CARD",
 		},
 		{
 			name: "Entity with no action configured - allow",
@@ -458,7 +452,7 @@ func TestPresidioProvider_determineAction(t *testing.T) {
 			results: []recognizerResult{
 				{EntityType: "UNKNOWN", Start: 0, End: 10},
 			},
-			expectedAction: provider.ActionAllow,
+			expectedText: "some data here",
 		},
 		{
 			name: "ALL action applies to unconfigured entity",
@@ -469,7 +463,7 @@ func TestPresidioProvider_determineAction(t *testing.T) {
 			results: []recognizerResult{
 				{EntityType: "UNKNOWN", Start: 0, End: 10},
 			},
-			expectedAction: provider.ActionMask,
+			expectedText: "<UNKNOWN>here",
 		},
 	}
 
@@ -517,9 +511,25 @@ func TestPresidioProvider_determineAction(t *testing.T) {
 				},
 				httpClient: &http.Client{},
 			}
-			result := p.determineAction(context.Background(), tt.text, tt.results)
-			if result.Action != tt.expectedAction {
-				t.Errorf("Expected action %s, got %s", tt.expectedAction, result.Action)
+			result, err := p.determineAction(context.Background(), tt.text, tt.results)
+
+			// Verify error
+			if tt.expectError {
+				if err == nil {
+					t.Error("Expected error, got nil")
+				} else if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error to contain %q, got %q", tt.errorContains, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
+			}
+
+			// Verify result
+			if tt.expectedText != "" && result.Text != tt.expectedText {
+				t.Errorf("Expected text %q, got %q", tt.expectedText, result.Text)
 			}
 		})
 	}

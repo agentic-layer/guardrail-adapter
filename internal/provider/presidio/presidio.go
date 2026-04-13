@@ -184,7 +184,7 @@ func (p *Provider) ProcessRequest(ctx context.Context, text string) (*provider.R
 	filteredResults := p.filterByThreshold(results)
 
 	// Determine action based on entity actions
-	return p.determineAction(ctx, text, filteredResults), nil
+	return p.determineAction(ctx, text, filteredResults)
 }
 
 // filterByThreshold filters out entities that don't meet the configured score threshold.
@@ -216,13 +216,14 @@ func (p *Provider) getThreshold(entityType string) float64 {
 }
 
 // determineAction determines the action to take based on the detected entities.
-// BLOCK takes precedence over MASK - if any entity is BLOCK, reject the entire request.
-func (p *Provider) determineAction(ctx context.Context, text string, results []recognizerResult) *provider.Result {
+// Returns an error if the request should be blocked.
+// Otherwise returns the processed text (original or masked) and metadata.
+func (p *Provider) determineAction(ctx context.Context, text string, results []recognizerResult) (*provider.Result, error) {
 	if len(results) == 0 {
-		// No entities detected, allow the request
+		// No entities detected, return original text
 		return &provider.Result{
-			Action: provider.ActionAllow,
-		}
+			Text: text,
+		}, nil
 	}
 
 	// Check for BLOCK entities first (BLOCK takes precedence)
@@ -241,33 +242,26 @@ func (p *Provider) determineAction(ctx context.Context, text string, results []r
 
 	// If any BLOCK entity is detected, reject the entire request
 	if len(blockEntities) > 0 {
-		return &provider.Result{
-			Action: provider.ActionBlock,
-			Reason: fmt.Sprintf("Detected blocked entities: %s", strings.Join(uniqueStrings(blockEntities), ", ")),
-		}
+		return nil, fmt.Errorf("detected blocked entities: %s", strings.Join(uniqueStrings(blockEntities), ", "))
 	}
 
 	// If there are MASK entities, apply masking using Presidio anonymize endpoint
 	if len(maskEntities) > 0 {
 		maskedText, anonymizeItems, err := p.anonymizeText(ctx, text, maskEntities)
 		if err != nil {
-			// If anonymization fails, return an error by blocking the request
-			return &provider.Result{
-				Action: provider.ActionBlock,
-				Reason: fmt.Sprintf("Failed to anonymize text: %v", err),
-			}
+			// If anonymization fails, return an error
+			return nil, fmt.Errorf("failed to anonymize text: %w", err)
 		}
 		return &provider.Result{
-			Action:           provider.ActionMask,
-			MaskedText:       maskedText,
+			Text:             maskedText,
 			ResponseMetadata: anonymizeItems,
-		}
+		}, nil
 	}
 
-	// No BLOCK or MASK entities, allow the request
+	// No BLOCK or MASK entities, return original text
 	return &provider.Result{
-		Action: provider.ActionAllow,
-	}
+		Text: text,
+	}, nil
 }
 
 // getAction returns the action for the given entity type.
