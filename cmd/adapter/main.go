@@ -45,7 +45,7 @@ func main() {
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "OK\n")
+		_, _ = fmt.Fprintf(w, "OK\n")
 	})
 	healthHTTPServer := &http.Server{
 		Addr:    *healthAddr,
@@ -67,7 +67,7 @@ func main() {
 		<-sigChan
 		log.Println("shutting down gracefully...")
 		grpcServer.GracefulStop()
-		healthHTTPServer.Close()
+		_ = healthHTTPServer.Close()
 	}()
 
 	// Start serving

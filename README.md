@@ -108,44 +108,6 @@ curl http://localhost:8080/health
 # Returns: OK
 ```
 
-## Development
-
-### Project Structure
-
-```
-.
-├── cmd/
-│   └── adapter/          # Main entry point
-│       └── main.go
-├── internal/
-│   └── extproc/          # ext_proc server implementation
-│       ├── server.go
-│       └── server_test.go
-├── .github/
-│   └── workflows/        # CI/CD workflows
-├── Dockerfile            # Multi-stage Docker build
-├── Makefile             # Build automation
-├── go.mod               # Go module definition
-└── README.md            # This file
-```
-
-### Testing Strategy
-
-The project includes unit tests for all core functionality:
-
-- **ext_proc tests**: Validate passthrough behavior for all request types
-- **Stream handling**: Test error conditions and context cancellation
-- **Integration tests**: Future tests will validate end-to-end guardrail processing
-
-### Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests: `make test`
-5. Run linting: `make lint-fix`
-6. Submit a pull request
-
 ## CI/CD
 
 The project uses GitHub Actions for continuous integration:
