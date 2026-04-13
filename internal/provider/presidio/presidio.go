@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 
 	"github.com/agentic-layer/guardrail-adapter/internal/provider"
@@ -34,19 +33,46 @@ type Provider struct {
 	httpClient *http.Client
 }
 
-// AnalyzeRequest represents the request to Presidio Analyzer API.
+// analyzeRequest represents the request to Presidio Analyzer API.
 type analyzeRequest struct {
 	Text     string   `json:"text"`
 	Language string   `json:"language"`
 	Entities []string `json:"entities,omitempty"`
 }
 
-// RecognizerResult represents a single PII detection result from Presidio.
+// recognizerResult represents a single PII detection result from Presidio.
 type recognizerResult struct {
 	EntityType string  `json:"entity_type"`
 	Start      int     `json:"start"`
 	End        int     `json:"end"`
 	Score      float64 `json:"score"`
+}
+
+// anonymizeRequest represents the request to Presidio Anonymizer API.
+type anonymizeRequest struct {
+	Text            string                      `json:"text"`
+	AnalyzerResults []recognizerResult          `json:"analyzer_results"`
+	Anonymizers     map[string]anonymizerConfig `json:"anonymizers,omitempty"`
+}
+
+// anonymizerConfig represents the configuration for a specific anonymizer.
+type anonymizerConfig struct {
+	Type string `json:"type"`
+}
+
+// anonymizeResponse represents the response from Presidio Anonymizer API.
+type anonymizeResponse struct {
+	Text  string                  `json:"text"`
+	Items []anonymizeResponseItem `json:"items"`
+}
+
+// anonymizeResponseItem represents an item in the anonymizer response.
+type anonymizeResponseItem struct {
+	Start      int    `json:"start"`
+	End        int    `json:"end"`
+	EntityType string `json:"entity_type"`
+	Text       string `json:"text"`
+	Operator   string `json:"operator"`
 }
 
 // New creates a new Presidio provider with the given configuration.
@@ -122,7 +148,7 @@ func (p *Provider) Inspect(ctx context.Context, text string) (*provider.Result, 
 	filteredResults := p.filterByThreshold(results)
 
 	// Determine action based on entity actions
-	return p.determineAction(text, filteredResults), nil
+	return p.determineAction(ctx, text, filteredResults)
 }
 
 // filterByThreshold filters out entities that don't meet the configured score threshold.
@@ -155,12 +181,12 @@ func (p *Provider) getThreshold(entityType string) float64 {
 
 // determineAction determines the action to take based on the detected entities.
 // BLOCK takes precedence over MASK - if any entity is BLOCK, reject the entire request.
-func (p *Provider) determineAction(text string, results []recognizerResult) *provider.Result {
+func (p *Provider) determineAction(ctx context.Context, text string, results []recognizerResult) (*provider.Result, error) {
 	if len(results) == 0 {
 		// No entities detected, allow the request
 		return &provider.Result{
 			Action: provider.ActionAllow,
-		}
+		}, nil
 	}
 
 	// Check for BLOCK entities first (BLOCK takes precedence)
@@ -182,22 +208,29 @@ func (p *Provider) determineAction(text string, results []recognizerResult) *pro
 		return &provider.Result{
 			Action: provider.ActionBlock,
 			Reason: fmt.Sprintf("Detected blocked entities: %s", strings.Join(uniqueStrings(blockEntities), ", ")),
-		}
+		}, nil
 	}
 
-	// If there are MASK entities, apply masking
+	// If there are MASK entities, apply masking using Presidio anonymize endpoint
 	if len(maskEntities) > 0 {
-		maskedText := p.maskText(text, maskEntities)
+		maskedText, err := p.anonymizeText(ctx, text, maskEntities)
+		if err != nil {
+			// If anonymization fails, return an error by blocking the request
+			return &provider.Result{
+				Action: provider.ActionBlock,
+				Reason: fmt.Sprintf("Failed to anonymize text: %v", err),
+			}, nil
+		}
 		return &provider.Result{
 			Action:     provider.ActionMask,
 			MaskedText: maskedText,
-		}
+		}, nil
 	}
 
 	// No BLOCK or MASK entities, allow the request
 	return &provider.Result{
 		Action: provider.ActionAllow,
-	}
+	}, nil
 }
 
 // getAction returns the action for the given entity type.
@@ -213,27 +246,66 @@ func (p *Provider) getAction(entityType string) string {
 	return "ALLOW"
 }
 
-// maskText replaces detected PII with <ENTITY_TYPE> placeholders.
-func (p *Provider) maskText(text string, results []recognizerResult) string {
-	// Sort results by start position in descending order to replace from end to start
-	// This avoids invalidating positions as we replace text
-	sorted := make([]recognizerResult, len(results))
-	copy(sorted, results)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Start > sorted[j].Start
-	})
-
-	// Convert string to rune slice for proper Unicode handling
-	runes := []rune(text)
-
-	// Replace each entity with its placeholder
-	for _, result := range sorted {
-		placeholder := fmt.Sprintf("<%s>", result.EntityType)
-		// Replace the entity text with the placeholder
-		runes = append(runes[:result.Start], append([]rune(placeholder), runes[result.End:]...)...)
+// anonymizeText uses Presidio's /anonymize endpoint to mask detected PII.
+func (p *Provider) anonymizeText(ctx context.Context, text string, results []recognizerResult) (string, error) {
+	// Build anonymizers config - use "replace" operator to replace with entity type
+	anonymizers := make(map[string]anonymizerConfig)
+	for _, result := range results {
+		if _, exists := anonymizers[result.EntityType]; !exists {
+			anonymizers[result.EntityType] = anonymizerConfig{
+				Type: "replace",
+			}
+		}
 	}
 
-	return string(runes)
+	// Prepare the anonymize request
+	reqBody := anonymizeRequest{
+		Text:            text,
+		AnalyzerResults: results,
+		Anonymizers:     anonymizers,
+	}
+
+	// Marshal request
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal anonymize request: %w", err)
+	}
+
+	// Create HTTP request
+	url := strings.TrimSuffix(p.config.Endpoint, "/") + "/anonymize"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create anonymize request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send request
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request to Presidio anonymizer: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	// Read response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read anonymize response body: %w", err)
+	}
+
+	// Check status code
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("presidio anonymizer returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var anonymizeResp anonymizeResponse
+	if err := json.Unmarshal(body, &anonymizeResp); err != nil {
+		return "", fmt.Errorf("failed to parse anonymize response: %w", err)
+	}
+
+	return anonymizeResp.Text, nil
 }
 
 // uniqueStrings returns a deduplicated slice of strings.

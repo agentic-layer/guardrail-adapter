@@ -219,51 +219,94 @@ func TestPresidioProvider_Inspect(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create mock Presidio server
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Verify request
-				if r.Method != "POST" {
-					t.Errorf("Expected POST request, got %s", r.Method)
-				}
-				if r.URL.Path != "/analyze" {
-					t.Errorf("Expected /analyze path, got %s", r.URL.Path)
-				}
-
-				// Verify request body
-				var reqBody analyzeRequest
-				if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-					t.Errorf("Failed to decode request body: %v", err)
-				}
-				if reqBody.Text != tt.text {
-					t.Errorf("Expected text %q, got %q", tt.text, reqBody.Text)
-				}
-				if reqBody.Language != tt.config.Language {
-					t.Errorf("Expected language %q, got %q", tt.config.Language, reqBody.Language)
-				}
-
-				// If EntityActions is set, verify entities filter
-				if len(tt.config.EntityActions) > 0 {
-					expectedEntities := make(map[string]bool)
-					for entity := range tt.config.EntityActions {
-						if entity != "ALL" {
-							expectedEntities[entity] = true
-						}
+				// Handle /analyze endpoint
+				if r.URL.Path == "/analyze" {
+					// Verify request
+					if r.Method != "POST" {
+						t.Errorf("Expected POST request, got %s", r.Method)
 					}
-					if len(expectedEntities) > 0 {
-						if len(reqBody.Entities) == 0 {
-							t.Error("Expected entities to be set in request")
+
+					// Verify request body
+					var reqBody analyzeRequest
+					if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+						t.Errorf("Failed to decode request body: %v", err)
+					}
+					if reqBody.Text != tt.text {
+						t.Errorf("Expected text %q, got %q", tt.text, reqBody.Text)
+					}
+					if reqBody.Language != tt.config.Language {
+						t.Errorf("Expected language %q, got %q", tt.config.Language, reqBody.Language)
+					}
+
+					// If EntityActions is set, verify entities filter
+					if len(tt.config.EntityActions) > 0 {
+						expectedEntities := make(map[string]bool)
+						for entity := range tt.config.EntityActions {
+							if entity != "ALL" {
+								expectedEntities[entity] = true
+							}
 						}
-						for _, entity := range reqBody.Entities {
-							if !expectedEntities[entity] {
-								t.Errorf("Unexpected entity in request: %s", entity)
+						if len(expectedEntities) > 0 {
+							if len(reqBody.Entities) == 0 {
+								t.Error("Expected entities to be set in request")
+							}
+							for _, entity := range reqBody.Entities {
+								if !expectedEntities[entity] {
+									t.Errorf("Unexpected entity in request: %s", entity)
+								}
 							}
 						}
 					}
+
+					// Send mock response
+					w.WriteHeader(tt.mockStatusCode)
+					if tt.mockStatusCode == http.StatusOK {
+						_ = json.NewEncoder(w).Encode(tt.mockResponse)
+					}
+					return
 				}
 
-				// Send mock response
-				w.WriteHeader(tt.mockStatusCode)
-				if tt.mockStatusCode == http.StatusOK {
-					_ = json.NewEncoder(w).Encode(tt.mockResponse)
+				// Handle /anonymize endpoint
+				if r.URL.Path == "/anonymize" {
+					if r.Method != "POST" {
+						t.Errorf("Expected POST request, got %s", r.Method)
+					}
+
+					var reqBody anonymizeRequest
+					if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+						t.Errorf("Failed to decode anonymize request body: %v", err)
+					}
+
+					// Mock anonymize response - replace entities with <ENTITY_TYPE>
+					anonymizedText := reqBody.Text
+					// Sort results by start position in descending order to replace from end to start
+					results := make([]recognizerResult, len(reqBody.AnalyzerResults))
+					copy(results, reqBody.AnalyzerResults)
+					for i := len(results) - 1; i >= 0; i-- {
+						for j := i - 1; j >= 0; j-- {
+							if results[j].Start < results[i].Start {
+								results[j], results[i] = results[i], results[j]
+							}
+						}
+					}
+
+					// Convert to runes for proper Unicode handling
+					runes := []rune(anonymizedText)
+					for _, result := range results {
+						placeholder := "<" + result.EntityType + ">"
+						runes = append(runes[:result.Start], append([]rune(placeholder), runes[result.End:]...)...)
+					}
+					anonymizedText = string(runes)
+
+					resp := anonymizeResponse{
+						Text: anonymizedText,
+					}
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(resp)
+					return
 				}
+
+				t.Errorf("Unexpected path: %s", r.URL.Path)
 			}))
 			defer server.Close()
 
@@ -356,60 +399,6 @@ func TestPresidioProvider_filterByThreshold(t *testing.T) {
 	}
 }
 
-func TestPresidioProvider_maskText(t *testing.T) {
-	tests := []struct {
-		name     string
-		text     string
-		results  []recognizerResult
-		expected string
-	}{
-		{
-			name: "single entity",
-			text: "John Doe works here",
-			results: []recognizerResult{
-				{EntityType: "PERSON", Start: 0, End: 8},
-			},
-			expected: "<PERSON> works here",
-		},
-		{
-			name: "multiple entities",
-			text: "John Doe at john@example.com",
-			results: []recognizerResult{
-				{EntityType: "PERSON", Start: 0, End: 8},
-				{EntityType: "EMAIL", Start: 12, End: 28},
-			},
-			expected: "<PERSON> at <EMAIL>",
-		},
-		{
-			name: "overlapping entities - should handle properly",
-			text: "Contact info",
-			results: []recognizerResult{
-				{EntityType: "PERSON", Start: 0, End: 7},
-				{EntityType: "DATA", Start: 8, End: 12},
-			},
-			expected: "<PERSON> <DATA>",
-		},
-		{
-			name: "unicode characters",
-			text: "名前は李明です",
-			results: []recognizerResult{
-				{EntityType: "PERSON", Start: 3, End: 5},
-			},
-			expected: "名前は<PERSON>です",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			p := &Provider{}
-			result := p.maskText(tt.text, tt.results)
-			if result != tt.expected {
-				t.Errorf("Expected %q, got %q", tt.expected, result)
-			}
-		})
-	}
-}
-
 func TestPresidioProvider_determineAction(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -486,12 +475,52 @@ func TestPresidioProvider_determineAction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Create mock Presidio server for anonymize endpoint
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/anonymize" {
+					var reqBody anonymizeRequest
+					if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+						t.Errorf("Failed to decode anonymize request: %v", err)
+					}
+
+					// Simple mock - replace entities with <ENTITY_TYPE>
+					anonymizedText := reqBody.Text
+					runes := []rune(anonymizedText)
+					// Sort results by start position in descending order
+					results := make([]recognizerResult, len(reqBody.AnalyzerResults))
+					copy(results, reqBody.AnalyzerResults)
+					for i := len(results) - 1; i >= 0; i-- {
+						for j := i - 1; j >= 0; j-- {
+							if results[j].Start < results[i].Start {
+								results[j], results[i] = results[i], results[j]
+							}
+						}
+					}
+					for _, result := range results {
+						placeholder := "<" + result.EntityType + ">"
+						runes = append(runes[:result.Start], append([]rune(placeholder), runes[result.End:]...)...)
+					}
+
+					resp := anonymizeResponse{
+						Text: string(runes),
+					}
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(resp)
+				}
+			}))
+			defer server.Close()
+
 			p := &Provider{
 				config: Config{
+					Endpoint:      server.URL,
 					EntityActions: tt.entityActions,
 				},
+				httpClient: &http.Client{},
 			}
-			result := p.determineAction(tt.text, tt.results)
+			result, err := p.determineAction(context.Background(), tt.text, tt.results)
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
 			if result.Action != tt.expectedAction {
 				t.Errorf("Expected action %s, got %s", tt.expectedAction, result.Action)
 			}
