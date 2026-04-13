@@ -1,5 +1,7 @@
 # Build stage
 FROM golang:1.24 AS builder
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /build
 
@@ -11,7 +13,7 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o adapter ./cmd/adapter
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o adapter ./cmd/adapter
 
 # Runtime stage - using distroless for minimal container
 FROM gcr.io/distroless/static-debian12:nonroot
