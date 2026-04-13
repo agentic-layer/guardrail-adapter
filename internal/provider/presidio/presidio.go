@@ -184,7 +184,7 @@ func (p *Provider) Inspect(ctx context.Context, text string) (*provider.Result, 
 	filteredResults := p.filterByThreshold(results)
 
 	// Determine action based on entity actions
-	return p.determineAction(ctx, text, filteredResults)
+	return p.determineAction(ctx, text, filteredResults), nil
 }
 
 // filterByThreshold filters out entities that don't meet the configured score threshold.
@@ -217,14 +217,12 @@ func (p *Provider) getThreshold(entityType string) float64 {
 
 // determineAction determines the action to take based on the detected entities.
 // BLOCK takes precedence over MASK - if any entity is BLOCK, reject the entire request.
-//
-//nolint:unparam // error return is needed for interface consistency and future extensibility
-func (p *Provider) determineAction(ctx context.Context, text string, results []recognizerResult) (*provider.Result, error) {
+func (p *Provider) determineAction(ctx context.Context, text string, results []recognizerResult) *provider.Result {
 	if len(results) == 0 {
 		// No entities detected, allow the request
 		return &provider.Result{
 			Action: provider.ActionAllow,
-		}, nil
+		}
 	}
 
 	// Check for BLOCK entities first (BLOCK takes precedence)
@@ -246,7 +244,7 @@ func (p *Provider) determineAction(ctx context.Context, text string, results []r
 		return &provider.Result{
 			Action: provider.ActionBlock,
 			Reason: fmt.Sprintf("Detected blocked entities: %s", strings.Join(uniqueStrings(blockEntities), ", ")),
-		}, nil
+		}
 	}
 
 	// If there are MASK entities, apply masking using Presidio anonymize endpoint
@@ -257,19 +255,19 @@ func (p *Provider) determineAction(ctx context.Context, text string, results []r
 			return &provider.Result{
 				Action: provider.ActionBlock,
 				Reason: fmt.Sprintf("Failed to anonymize text: %v", err),
-			}, nil
+			}
 		}
 		return &provider.Result{
 			Action:                provider.ActionMask,
 			MaskedText:            maskedText,
 			AnonymizationMetadata: anonymizeItems,
-		}, nil
+		}
 	}
 
 	// No BLOCK or MASK entities, allow the request
 	return &provider.Result{
 		Action: provider.ActionAllow,
-	}, nil
+	}
 }
 
 // getAction returns the action for the given entity type.

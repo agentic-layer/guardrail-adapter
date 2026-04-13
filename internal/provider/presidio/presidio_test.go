@@ -517,10 +517,7 @@ func TestPresidioProvider_determineAction(t *testing.T) {
 				},
 				httpClient: &http.Client{},
 			}
-			result, err := p.determineAction(context.Background(), tt.text, tt.results)
-			if err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
+			result := p.determineAction(context.Background(), tt.text, tt.results)
 			if result.Action != tt.expectedAction {
 				t.Errorf("Expected action %s, got %s", tt.expectedAction, result.Action)
 			}
