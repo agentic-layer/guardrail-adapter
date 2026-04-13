@@ -11,7 +11,7 @@ func TestParseGuardrailConfig(t *testing.T) {
 		fields       map[string]string
 		wantNil      bool
 		wantProvider string
-		wantModes    []string
+		wantModes    []Mode
 		wantError    bool
 	}{
 		{
@@ -25,7 +25,7 @@ func TestParseGuardrailConfig(t *testing.T) {
 				"guardrail.presidio.entity_actions":   `{"PERSON": "MASK", "CREDIT_CARD": "BLOCK"}`,
 			},
 			wantProvider: "presidio-api",
-			wantModes:    []string{"pre_call", "post_call"},
+			wantModes:    []Mode{ModePreCall, ModePostCall},
 		},
 		{
 			name: "presidio_minimal_config",
@@ -35,7 +35,7 @@ func TestParseGuardrailConfig(t *testing.T) {
 				"guardrail.presidio.language": "en",
 			},
 			wantProvider: "presidio-api",
-			wantModes:    []string{},
+			wantModes:    []Mode{},
 		},
 		{
 			name: "no_guardrail_config",
@@ -55,7 +55,7 @@ func TestParseGuardrailConfig(t *testing.T) {
 				"guardrail.provider": "presidio-api",
 			},
 			wantProvider: "presidio-api",
-			wantModes:    []string{},
+			wantModes:    []Mode{},
 		},
 		{
 			name: "single_mode",
@@ -64,7 +64,7 @@ func TestParseGuardrailConfig(t *testing.T) {
 				"guardrail.mode":     "pre_call",
 			},
 			wantProvider: "presidio-api",
-			wantModes:    []string{"pre_call"},
+			wantModes:    []Mode{ModePreCall},
 		},
 		{
 			name: "mode_with_spaces",
@@ -73,7 +73,7 @@ func TestParseGuardrailConfig(t *testing.T) {
 				"guardrail.mode":     " pre_call , post_call ",
 			},
 			wantProvider: "presidio-api",
-			wantModes:    []string{"pre_call", "post_call"},
+			wantModes:    []Mode{ModePreCall, ModePostCall},
 		},
 		{
 			name: "unknown_provider",
@@ -82,7 +82,7 @@ func TestParseGuardrailConfig(t *testing.T) {
 				"guardrail.mode":     "pre_call",
 			},
 			wantProvider: "future-provider",
-			wantModes:    []string{"pre_call"},
+			wantModes:    []Mode{ModePreCall},
 		},
 		{
 			name: "invalid_score_thresholds_json",
@@ -326,52 +326,52 @@ func TestParseModes(t *testing.T) {
 	testCases := []struct {
 		name      string
 		modeStr   string
-		wantModes []string
+		wantModes []Mode
 	}{
 		{
 			name:      "single_mode",
 			modeStr:   "pre_call",
-			wantModes: []string{"pre_call"},
+			wantModes: []Mode{ModePreCall},
 		},
 		{
 			name:      "two_modes",
 			modeStr:   "pre_call,post_call",
-			wantModes: []string{"pre_call", "post_call"},
+			wantModes: []Mode{ModePreCall, ModePostCall},
 		},
 		{
 			name:      "modes_with_spaces",
 			modeStr:   " pre_call , post_call ",
-			wantModes: []string{"pre_call", "post_call"},
+			wantModes: []Mode{ModePreCall, ModePostCall},
 		},
 		{
 			name:      "three_modes",
 			modeStr:   "pre_call,post_call,streaming",
-			wantModes: []string{"pre_call", "post_call", "streaming"},
+			wantModes: []Mode{ModePreCall, ModePostCall, "streaming"},
 		},
 		{
 			name:      "empty_string",
 			modeStr:   "",
-			wantModes: []string{},
+			wantModes: []Mode{},
 		},
 		{
 			name:      "only_spaces",
 			modeStr:   "  ",
-			wantModes: []string{},
+			wantModes: []Mode{},
 		},
 		{
 			name:      "trailing_comma",
 			modeStr:   "pre_call,post_call,",
-			wantModes: []string{"pre_call", "post_call"},
+			wantModes: []Mode{ModePreCall, ModePostCall},
 		},
 		{
 			name:      "leading_comma",
 			modeStr:   ",pre_call,post_call",
-			wantModes: []string{"pre_call", "post_call"},
+			wantModes: []Mode{ModePreCall, ModePostCall},
 		},
 		{
 			name:      "multiple_consecutive_commas",
 			modeStr:   "pre_call,,post_call",
-			wantModes: []string{"pre_call", "post_call"},
+			wantModes: []Mode{ModePreCall, ModePostCall},
 		},
 	}
 

@@ -14,8 +14,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"github.com/agentic-layer/guardrail-adapter/internal/mcp"
 	"github.com/agentic-layer/guardrail-adapter/internal/metadata"
+	"github.com/agentic-layer/guardrail-adapter/internal/protocol"
+	"github.com/agentic-layer/guardrail-adapter/internal/protocol/mcpparser"
 	"github.com/agentic-layer/guardrail-adapter/internal/provider"
 	"github.com/agentic-layer/guardrail-adapter/internal/provider/presidio"
 )
@@ -23,6 +24,7 @@ import (
 // Server implements the Envoy ExternalProcessor service.
 type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
+	protocolRegistry *protocol.Registry
 }
 
 // streamState holds per-stream state for processing requests.
@@ -34,7 +36,14 @@ type streamState struct {
 
 // NewServer creates a new ext_proc server.
 func NewServer() *Server {
-	return &Server{}
+	// Initialize protocol registry with MCP parser
+	registry := protocol.NewRegistry(
+		mcpparser.NewMCPParser(),
+	)
+
+	return &Server{
+		protocolRegistry: registry,
+	}
 }
 
 // Process implements the bidirectional streaming RPC for external processing.
@@ -129,7 +138,7 @@ func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *s
 // handleRequestBody processes the request body with guardrail inspection.
 func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody, state *streamState) *extprocv3.ProcessingResponse {
 	// If no config is set or pre_call mode is not enabled, passthrough
-	if state.config == nil || !s.modeEnabled(state.config, "pre_call") {
+	if state.config == nil || !s.modeEnabled(state.config, metadata.ModePreCall) {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{},
@@ -137,10 +146,22 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 		}
 	}
 
-	// Parse MCP request
-	mcpReq, err := mcp.ParseRequest(body.Body)
+	// Select appropriate protocol parser
+	parser := s.protocolRegistry.SelectParser(ctx, body.Body, nil)
+	if parser == nil {
+		// No parser available, passthrough
+		log.Printf("no protocol parser available for request body")
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_RequestBody{
+				RequestBody: &extprocv3.BodyResponse{},
+			},
+		}
+	}
+
+	// Parse request and extract texts
+	texts, shouldInspect, err := parser.ParseRequest(ctx, body.Body)
 	if err != nil {
-		log.Printf("error parsing MCP request: %v", err)
+		log.Printf("error parsing request: %v", err)
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{},
@@ -148,29 +169,8 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 		}
 	}
 
-	// Only process tools/call methods
-	if mcpReq.Method != "tools/call" {
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_RequestBody{
-				RequestBody: &extprocv3.BodyResponse{},
-			},
-		}
-	}
-
-	// Extract texts from the request
-	params, err := mcp.ParseToolsCallParams(mcpReq)
-	if err != nil {
-		log.Printf("error parsing tools/call params: %v", err)
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_RequestBody{
-				RequestBody: &extprocv3.BodyResponse{},
-			},
-		}
-	}
-
-	texts := mcp.ExtractTextsFromToolCallRequest(params)
-	if len(texts) == 0 {
-		// No texts to inspect, passthrough
+	// If not inspectable or no texts to inspect, passthrough
+	if !shouldInspect || len(texts) == 0 {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{},
@@ -210,7 +210,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 
 	// If there are replacements, apply MASK action
 	if len(replacements) > 0 {
-		modifiedBody, err := mcp.ReplaceTexts(body.Body, replacements)
+		modifiedBody, err := parser.ReplaceTexts(ctx, body.Body, replacements)
 		if err != nil {
 			log.Printf("error replacing texts: %v", err)
 			return &extprocv3.ProcessingResponse{
@@ -246,7 +246,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 // handleResponseBody processes the response body with guardrail inspection.
 func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBody, state *streamState) *extprocv3.ProcessingResponse {
 	// If no config is set or post_call mode is not enabled, passthrough
-	if state.config == nil || !s.modeEnabled(state.config, "post_call") {
+	if state.config == nil || !s.modeEnabled(state.config, metadata.ModePostCall) {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
@@ -254,10 +254,22 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 		}
 	}
 
-	// Parse MCP response
-	mcpResp, err := mcp.ParseResponse(body.Body)
+	// Select appropriate protocol parser
+	parser := s.protocolRegistry.SelectParser(ctx, body.Body, nil)
+	if parser == nil {
+		// No parser available, passthrough
+		log.Printf("no protocol parser available for response body")
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_ResponseBody{
+				ResponseBody: &extprocv3.BodyResponse{},
+			},
+		}
+	}
+
+	// Parse response and extract texts
+	texts, shouldInspect, err := parser.ParseResponse(ctx, body.Body)
 	if err != nil {
-		log.Printf("error parsing MCP response: %v", err)
+		log.Printf("error parsing response: %v", err)
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
@@ -265,29 +277,8 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 		}
 	}
 
-	// Skip error responses
-	if mcpResp.Error != nil {
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_ResponseBody{
-				ResponseBody: &extprocv3.BodyResponse{},
-			},
-		}
-	}
-
-	// Extract texts from the response
-	result, err := mcp.ParseToolCallResult(mcpResp)
-	if err != nil {
-		log.Printf("error parsing tool call result: %v", err)
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_ResponseBody{
-				ResponseBody: &extprocv3.BodyResponse{},
-			},
-		}
-	}
-
-	texts := mcp.ExtractTextsFromToolCallResponse(result)
-	if len(texts) == 0 {
-		// No texts to inspect, passthrough
+	// If not inspectable or no texts to inspect, passthrough
+	if !shouldInspect || len(texts) == 0 {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
@@ -340,7 +331,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 
 	// If there are replacements, apply MASK action
 	if len(replacements) > 0 {
-		modifiedBody, err := mcp.ReplaceTexts(body.Body, replacements)
+		modifiedBody, err := parser.ReplaceTexts(ctx, body.Body, replacements)
 		if err != nil {
 			log.Printf("error replacing texts: %v", err)
 			return &extprocv3.ProcessingResponse{
@@ -425,7 +416,7 @@ func (s *Server) createProvider(config *metadata.GuardrailConfig) (provider.Guar
 }
 
 // modeEnabled checks if the given mode is enabled in the configuration.
-func (s *Server) modeEnabled(config *metadata.GuardrailConfig, mode string) bool {
+func (s *Server) modeEnabled(config *metadata.GuardrailConfig, mode metadata.Mode) bool {
 	if config == nil {
 		return false
 	}
