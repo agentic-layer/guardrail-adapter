@@ -5,149 +5,120 @@ import (
 	"fmt"
 )
 
-// InspectionResult contains the result of inspecting an MCP message.
-type InspectionResult struct {
-	ShouldInspect bool
-	Texts         []TextExtraction
-}
-
 // TextExtraction represents a text field extracted from the message with its JSON path.
 type TextExtraction struct {
 	Path  string // JSON path to the text field (e.g., "params.arguments.query")
 	Value string // The extracted text value
 }
 
-// jsonRPCRequest represents a JSON-RPC 2.0 request message.
-type jsonRPCRequest struct {
+// Request represents a parsed JSON-RPC 2.0 request message.
+type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      interface{}     `json:"id,omitempty"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
-// jsonRPCResponse represents a JSON-RPC 2.0 response message.
-type jsonRPCResponse struct {
+// Response represents a parsed JSON-RPC 2.0 response message.
+type Response struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      interface{}     `json:"id,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *jsonRPCError   `json:"error,omitempty"`
+	Error   *Error          `json:"error,omitempty"`
 }
 
-// jsonRPCError represents a JSON-RPC 2.0 error object.
-type jsonRPCError struct {
+// Error represents a JSON-RPC 2.0 error object.
+type Error struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
-// toolsCallParams represents the params for a tools/call request.
-type toolsCallParams struct {
+// ToolsCallParams represents the params for a tools/call request.
+type ToolsCallParams struct {
 	Name      string                 `json:"name"`
 	Arguments map[string]interface{} `json:"arguments,omitempty"`
 }
 
-// toolCallResult represents the result of a tools/call response.
-type toolCallResult struct {
-	Content []contentItem `json:"content,omitempty"`
+// ToolCallResult represents the result of a tools/call response.
+type ToolCallResult struct {
+	Content []ContentItem `json:"content,omitempty"`
 	IsError bool          `json:"isError,omitempty"`
 }
 
-// contentItem represents an item in the content array.
-type contentItem struct {
+// ContentItem represents an item in the content array.
+type ContentItem struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
 }
 
-// ExtractTexts extracts text fields from MCP JSON-RPC messages for guardrail inspection.
-// For tools/call requests: extracts all string values from params.arguments
-// For tool call responses: extracts content[].text fields from result
-// For other methods: returns ShouldInspect=false
-func ExtractTexts(body []byte) (*InspectionResult, error) {
-	// Try to parse as request first
-	var req jsonRPCRequest
-	if err := json.Unmarshal(body, &req); err == nil && req.Method != "" {
-		return extractFromRequest(&req)
+// ParseRequest parses a JSON-RPC 2.0 request from raw bytes.
+func ParseRequest(body []byte) (*Request, error) {
+	var req Request
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON-RPC request: %w", err)
 	}
-
-	// Try to parse as response
-	var resp jsonRPCResponse
-	if err := json.Unmarshal(body, &resp); err == nil {
-		return extractFromResponse(&resp)
+	if req.Method == "" {
+		return nil, fmt.Errorf("invalid JSON-RPC request: missing method")
 	}
-
-	return nil, fmt.Errorf("invalid JSON-RPC message")
+	return &req, nil
 }
 
-// extractFromRequest extracts texts from a JSON-RPC request.
-func extractFromRequest(req *jsonRPCRequest) (*InspectionResult, error) {
-	// Only inspect tools/call requests
-	if req.Method != "tools/call" {
-		return &InspectionResult{
-			ShouldInspect: false,
-			Texts:         []TextExtraction{},
-		}, nil
+// ParseResponse parses a JSON-RPC 2.0 response from raw bytes.
+func ParseResponse(body []byte) (*Response, error) {
+	var resp Response
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON-RPC response: %w", err)
 	}
+	return &resp, nil
+}
 
-	var params toolsCallParams
+// ParseToolsCallParams parses the params of a tools/call request.
+func ParseToolsCallParams(req *Request) (*ToolsCallParams, error) {
+	if req.Method != "tools/call" {
+		return nil, fmt.Errorf("not a tools/call request: method is %s", req.Method)
+	}
+	var params ToolsCallParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return nil, fmt.Errorf("failed to parse tools/call params: %w", err)
 	}
-
-	result := &InspectionResult{
-		ShouldInspect: true,
-		Texts:         []TextExtraction{},
-	}
-
-	// Extract all string values from arguments
-	extractStringsFromMap("params.arguments", params.Arguments, &result.Texts)
-
-	return result, nil
+	return &params, nil
 }
 
-// extractFromResponse extracts texts from a JSON-RPC response.
-func extractFromResponse(resp *jsonRPCResponse) (*InspectionResult, error) {
-	// If there's an error in the response, don't inspect
-	if resp.Error != nil || resp.Result == nil {
-		return &InspectionResult{
-			ShouldInspect: false,
-			Texts:         []TextExtraction{},
-		}, nil
+// ParseToolCallResult parses the result of a tools/call response.
+func ParseToolCallResult(resp *Response) (*ToolCallResult, error) {
+	if resp.Error != nil {
+		return nil, fmt.Errorf("response contains error: %s", resp.Error.Message)
 	}
-
-	// Try to parse as tool call result
-	var result toolCallResult
+	if resp.Result == nil {
+		return nil, fmt.Errorf("response missing result")
+	}
+	var result ToolCallResult
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		// If it doesn't match tool call result structure, don't inspect
-		return &InspectionResult{
-			ShouldInspect: false,
-			Texts:         []TextExtraction{},
-		}, nil
+		return nil, fmt.Errorf("failed to parse tool call result: %w", err)
 	}
+	return &result, nil
+}
 
-	// Only inspect if there's content
-	if len(result.Content) == 0 {
-		return &InspectionResult{
-			ShouldInspect: false,
-			Texts:         []TextExtraction{},
-		}, nil
-	}
+// ExtractTextsFromToolCallRequest extracts all string values from a tools/call request's arguments.
+func ExtractTextsFromToolCallRequest(params *ToolsCallParams) []TextExtraction {
+	texts := []TextExtraction{}
+	extractStringsFromMap("params.arguments", params.Arguments, &texts)
+	return texts
+}
 
-	inspectionResult := &InspectionResult{
-		ShouldInspect: true,
-		Texts:         []TextExtraction{},
-	}
-
-	// Extract text fields from content array
+// ExtractTextsFromToolCallResponse extracts text fields from a tools/call response's content array.
+func ExtractTextsFromToolCallResponse(result *ToolCallResult) []TextExtraction {
+	texts := []TextExtraction{}
 	for i, item := range result.Content {
 		if item.Type == "text" && item.Text != "" {
-			inspectionResult.Texts = append(inspectionResult.Texts, TextExtraction{
+			texts = append(texts, TextExtraction{
 				Path:  fmt.Sprintf("result.content[%d].text", i),
 				Value: item.Text,
 			})
 		}
 	}
-
-	return inspectionResult, nil
+	return texts
 }
 
 // extractStringsFromMap recursively extracts string values from a map.

@@ -5,14 +5,285 @@ import (
 	"testing"
 )
 
-// TestExtractTexts_ToolsCallRequest tests text extraction from tools/call requests.
-func TestExtractTexts_ToolsCallRequest(t *testing.T) {
+// TestParseRequest tests parsing of JSON-RPC requests.
+func TestParseRequest(t *testing.T) {
 	testCases := []struct {
-		name          string
-		body          string
-		shouldInspect bool
-		wantTexts     []TextExtraction
-		wantError     bool
+		name       string
+		body       string
+		wantError  bool
+		wantMethod string
+	}{
+		{
+			name: "valid_tools_call_request",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"method": "tools/call",
+				"params": {
+					"name": "search",
+					"arguments": {
+						"query": "test search"
+					}
+				}
+			}`,
+			wantMethod: "tools/call",
+		},
+		{
+			name: "valid_tools_list_request",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"method": "tools/list"
+			}`,
+			wantMethod: "tools/list",
+		},
+		{
+			name:      "invalid_json",
+			body:      `{invalid json}`,
+			wantError: true,
+		},
+		{
+			name: "missing_method",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 1
+			}`,
+			wantError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := ParseRequest([]byte(tc.body))
+
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v, want nil", err)
+			}
+
+			if req.Method != tc.wantMethod {
+				t.Errorf("Method = %q, want %q", req.Method, tc.wantMethod)
+			}
+		})
+	}
+}
+
+// TestParseResponse tests parsing of JSON-RPC responses.
+func TestParseResponse(t *testing.T) {
+	testCases := []struct {
+		name      string
+		body      string
+		wantError bool
+		hasError  bool
+		hasResult bool
+	}{
+		{
+			name: "valid_success_response",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"result": {
+					"content": [
+						{
+							"type": "text",
+							"text": "Search results"
+						}
+					]
+				}
+			}`,
+			hasResult: true,
+		},
+		{
+			name: "valid_error_response",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"error": {
+					"code": -32600,
+					"message": "Invalid Request"
+				}
+			}`,
+			hasError: true,
+		},
+		{
+			name:      "invalid_json",
+			body:      `{invalid json}`,
+			wantError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := ParseResponse([]byte(tc.body))
+
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ParseResponse() error = %v, want nil", err)
+			}
+
+			if tc.hasError && resp.Error == nil {
+				t.Error("expected error in response, got nil")
+			}
+
+			if tc.hasResult && resp.Result == nil {
+				t.Error("expected result in response, got nil")
+			}
+		})
+	}
+}
+
+// TestParseToolsCallParams tests parsing of tools/call request params.
+func TestParseToolsCallParams(t *testing.T) {
+	testCases := []struct {
+		name      string
+		body      string
+		wantError bool
+		wantName  string
+	}{
+		{
+			name: "valid_tools_call",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"method": "tools/call",
+				"params": {
+					"name": "search",
+					"arguments": {
+						"query": "test"
+					}
+				}
+			}`,
+			wantName: "search",
+		},
+		{
+			name: "not_tools_call",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"method": "tools/list"
+			}`,
+			wantError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := ParseRequest([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+
+			params, err := ParseToolsCallParams(req)
+
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ParseToolsCallParams() error = %v, want nil", err)
+			}
+
+			if params.Name != tc.wantName {
+				t.Errorf("Name = %q, want %q", params.Name, tc.wantName)
+			}
+		})
+	}
+}
+
+// TestParseToolCallResult tests parsing of tool call response results.
+func TestParseToolCallResult(t *testing.T) {
+	testCases := []struct {
+		name        string
+		body        string
+		wantError   bool
+		wantContent int
+	}{
+		{
+			name: "valid_result",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"result": {
+					"content": [
+						{
+							"type": "text",
+							"text": "Result text"
+						}
+					]
+				}
+			}`,
+			wantContent: 1,
+		},
+		{
+			name: "error_response",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"error": {
+					"code": -32600,
+					"message": "Invalid Request"
+				}
+			}`,
+			wantError: true,
+		},
+		{
+			name: "missing_result",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 1
+			}`,
+			wantError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := ParseResponse([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("ParseResponse() error = %v", err)
+			}
+
+			result, err := ParseToolCallResult(resp)
+
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ParseToolCallResult() error = %v, want nil", err)
+			}
+
+			if len(result.Content) != tc.wantContent {
+				t.Errorf("Content length = %d, want %d", len(result.Content), tc.wantContent)
+			}
+		})
+	}
+}
+
+// TestExtractTextsFromToolCallRequest tests text extraction from tool call requests.
+func TestExtractTextsFromToolCallRequest(t *testing.T) {
+	testCases := []struct {
+		name      string
+		body      string
+		wantTexts []TextExtraction
 	}{
 		{
 			name: "simple_string_argument",
@@ -27,7 +298,6 @@ func TestExtractTexts_ToolsCallRequest(t *testing.T) {
 					}
 				}
 			}`,
-			shouldInspect: true,
 			wantTexts: []TextExtraction{
 				{Path: "params.arguments.query", Value: "test search"},
 			},
@@ -47,7 +317,6 @@ func TestExtractTexts_ToolsCallRequest(t *testing.T) {
 					}
 				}
 			}`,
-			shouldInspect: true,
 			wantTexts: []TextExtraction{
 				{Path: "params.arguments.email", Value: "john@example.com"},
 				{Path: "params.arguments.name", Value: "John Doe"},
@@ -73,7 +342,6 @@ func TestExtractTexts_ToolsCallRequest(t *testing.T) {
 					}
 				}
 			}`,
-			shouldInspect: true,
 			wantTexts: []TextExtraction{
 				{Path: "params.arguments.user.name", Value: "Jane Smith"},
 				{Path: "params.arguments.user.address.street", Value: "123 Main St"},
@@ -93,7 +361,6 @@ func TestExtractTexts_ToolsCallRequest(t *testing.T) {
 					}
 				}
 			}`,
-			shouldInspect: true,
 			wantTexts: []TextExtraction{
 				{Path: "params.arguments.items[0]", Value: "first item"},
 				{Path: "params.arguments.items[1]", Value: "second item"},
@@ -116,7 +383,6 @@ func TestExtractTexts_ToolsCallRequest(t *testing.T) {
 					}
 				}
 			}`,
-			shouldInspect: true,
 			wantTexts: []TextExtraction{
 				{Path: "params.arguments.comment", Value: "adding numbers"},
 				{Path: "params.arguments.operation", Value: "add"},
@@ -133,8 +399,7 @@ func TestExtractTexts_ToolsCallRequest(t *testing.T) {
 					"arguments": {}
 				}
 			}`,
-			shouldInspect: true,
-			wantTexts:     []TextExtraction{},
+			wantTexts: []TextExtraction{},
 		},
 		{
 			name: "no_arguments",
@@ -146,37 +411,31 @@ func TestExtractTexts_ToolsCallRequest(t *testing.T) {
 					"name": "status"
 				}
 			}`,
-			shouldInspect: true,
-			wantTexts:     []TextExtraction{},
+			wantTexts: []TextExtraction{},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := ExtractTexts([]byte(tc.body))
-
-			if tc.wantError {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-
+			req, err := ParseRequest([]byte(tc.body))
 			if err != nil {
-				t.Fatalf("ExtractTexts() error = %v, want nil", err)
+				t.Fatalf("ParseRequest() error = %v", err)
 			}
 
-			if result.ShouldInspect != tc.shouldInspect {
-				t.Errorf("ShouldInspect = %v, want %v", result.ShouldInspect, tc.shouldInspect)
+			params, err := ParseToolsCallParams(req)
+			if err != nil {
+				t.Fatalf("ParseToolsCallParams() error = %v", err)
 			}
 
-			if len(result.Texts) != len(tc.wantTexts) {
-				t.Errorf("got %d texts, want %d", len(result.Texts), len(tc.wantTexts))
+			texts := ExtractTextsFromToolCallRequest(params)
+
+			if len(texts) != len(tc.wantTexts) {
+				t.Errorf("got %d texts, want %d", len(texts), len(tc.wantTexts))
 			}
 
 			// Convert to map for easier comparison (order may vary for map iteration)
 			gotMap := make(map[string]string)
-			for _, te := range result.Texts {
+			for _, te := range texts {
 				gotMap[te.Path] = te.Value
 			}
 
@@ -191,14 +450,12 @@ func TestExtractTexts_ToolsCallRequest(t *testing.T) {
 	}
 }
 
-// TestExtractTexts_ToolsCallResponse tests text extraction from tool call responses.
-func TestExtractTexts_ToolsCallResponse(t *testing.T) {
+// TestExtractTextsFromToolCallResponse tests text extraction from tool call responses.
+func TestExtractTextsFromToolCallResponse(t *testing.T) {
 	testCases := []struct {
-		name          string
-		body          string
-		shouldInspect bool
-		wantTexts     []TextExtraction
-		wantError     bool
+		name      string
+		body      string
+		wantTexts []TextExtraction
 	}{
 		{
 			name: "single_text_content",
@@ -214,7 +471,6 @@ func TestExtractTexts_ToolsCallResponse(t *testing.T) {
 					]
 				}
 			}`,
-			shouldInspect: true,
 			wantTexts: []TextExtraction{
 				{Path: "result.content[0].text", Value: "Search results: Found 5 items"},
 			},
@@ -241,7 +497,6 @@ func TestExtractTexts_ToolsCallResponse(t *testing.T) {
 					]
 				}
 			}`,
-			shouldInspect: true,
 			wantTexts: []TextExtraction{
 				{Path: "result.content[0].text", Value: "First response"},
 				{Path: "result.content[1].text", Value: "Second response"},
@@ -270,7 +525,6 @@ func TestExtractTexts_ToolsCallResponse(t *testing.T) {
 					]
 				}
 			}`,
-			shouldInspect: true,
 			wantTexts: []TextExtraction{
 				{Path: "result.content[0].text", Value: "Text content"},
 				{Path: "result.content[2].text", Value: "More text"},
@@ -285,21 +539,7 @@ func TestExtractTexts_ToolsCallResponse(t *testing.T) {
 					"content": []
 				}
 			}`,
-			shouldInspect: false,
-			wantTexts:     []TextExtraction{},
-		},
-		{
-			name: "error_response",
-			body: `{
-				"jsonrpc": "2.0",
-				"id": 5,
-				"error": {
-					"code": -32600,
-					"message": "Invalid Request"
-				}
-			}`,
-			shouldInspect: false,
-			wantTexts:     []TextExtraction{},
+			wantTexts: []TextExtraction{},
 		},
 		{
 			name: "empty_text_fields_ignored",
@@ -319,141 +559,42 @@ func TestExtractTexts_ToolsCallResponse(t *testing.T) {
 					]
 				}
 			}`,
-			shouldInspect: true,
 			wantTexts: []TextExtraction{
 				{Path: "result.content[1].text", Value: "Valid text"},
 			},
-		},
-		{
-			name: "non_tool_result_structure",
-			body: `{
-				"jsonrpc": "2.0",
-				"id": 7,
-				"result": {
-					"status": "ok",
-					"data": "some data"
-				}
-			}`,
-			shouldInspect: false,
-			wantTexts:     []TextExtraction{},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := ExtractTexts([]byte(tc.body))
-
-			if tc.wantError {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-
+			resp, err := ParseResponse([]byte(tc.body))
 			if err != nil {
-				t.Fatalf("ExtractTexts() error = %v, want nil", err)
+				t.Fatalf("ParseResponse() error = %v", err)
 			}
 
-			if result.ShouldInspect != tc.shouldInspect {
-				t.Errorf("ShouldInspect = %v, want %v", result.ShouldInspect, tc.shouldInspect)
+			result, err := ParseToolCallResult(resp)
+			if err != nil {
+				t.Fatalf("ParseToolCallResult() error = %v", err)
 			}
 
-			if len(result.Texts) != len(tc.wantTexts) {
-				t.Errorf("got %d texts, want %d", len(result.Texts), len(tc.wantTexts))
+			texts := ExtractTextsFromToolCallResponse(result)
+
+			if len(texts) != len(tc.wantTexts) {
+				t.Errorf("got %d texts, want %d", len(texts), len(tc.wantTexts))
 			}
 
 			for i, want := range tc.wantTexts {
-				if i >= len(result.Texts) {
+				if i >= len(texts) {
 					t.Errorf("missing text at index %d", i)
 					continue
 				}
-				got := result.Texts[i]
+				got := texts[i]
 				if got.Path != want.Path {
 					t.Errorf("text[%d].Path = %q, want %q", i, got.Path, want.Path)
 				}
 				if got.Value != want.Value {
 					t.Errorf("text[%d].Value = %q, want %q", i, got.Value, want.Value)
 				}
-			}
-		})
-	}
-}
-
-// TestExtractTexts_OtherMethods tests that other MCP methods return ShouldInspect=false.
-func TestExtractTexts_OtherMethods(t *testing.T) {
-	testCases := []struct {
-		name   string
-		body   string
-		method string
-	}{
-		{
-			name:   "tools_list",
-			method: "tools/list",
-			body: `{
-				"jsonrpc": "2.0",
-				"id": 1,
-				"method": "tools/list"
-			}`,
-		},
-		{
-			name:   "initialize",
-			method: "initialize",
-			body: `{
-				"jsonrpc": "2.0",
-				"id": 2,
-				"method": "initialize",
-				"params": {
-					"protocolVersion": "1.0",
-					"clientInfo": {
-						"name": "test-client",
-						"version": "1.0.0"
-					}
-				}
-			}`,
-		},
-		{
-			name:   "ping",
-			method: "ping",
-			body: `{
-				"jsonrpc": "2.0",
-				"id": 3,
-				"method": "ping"
-			}`,
-		},
-		{
-			name:   "resources_list",
-			method: "resources/list",
-			body: `{
-				"jsonrpc": "2.0",
-				"id": 4,
-				"method": "resources/list"
-			}`,
-		},
-		{
-			name:   "prompts_list",
-			method: "prompts/list",
-			body: `{
-				"jsonrpc": "2.0",
-				"id": 5,
-				"method": "prompts/list"
-			}`,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			result, err := ExtractTexts([]byte(tc.body))
-
-			if err != nil {
-				t.Fatalf("ExtractTexts() error = %v, want nil", err)
-			}
-
-			if result.ShouldInspect {
-				t.Errorf("ShouldInspect = true for method %s, want false", tc.method)
-			}
-
-			if len(result.Texts) != 0 {
-				t.Errorf("got %d texts for non-inspectable method, want 0", len(result.Texts))
 			}
 		})
 	}
@@ -593,36 +734,6 @@ func TestReplaceTexts(t *testing.T) {
 
 			if string(gotBytes) != string(wantBytes) {
 				t.Errorf("ReplaceTexts() = %s, want %s", string(gotBytes), string(wantBytes))
-			}
-		})
-	}
-}
-
-// TestExtractTexts_InvalidJSON tests handling of invalid JSON.
-func TestExtractTexts_InvalidJSON(t *testing.T) {
-	testCases := []struct {
-		name string
-		body string
-	}{
-		{
-			name: "malformed_json",
-			body: `{invalid json`,
-		},
-		{
-			name: "empty_string",
-			body: ``,
-		},
-		{
-			name: "non_json",
-			body: `this is not json`,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := ExtractTexts([]byte(tc.body))
-			if err == nil {
-				t.Fatal("expected error for invalid JSON, got nil")
 			}
 		})
 	}
