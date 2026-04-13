@@ -22,15 +22,17 @@ type Result struct {
 	MaskedText string
 	// Reason is a human-readable reason for blocking, populated when Action == ActionBlock.
 	Reason string
-	// AnonymizationMetadata stores metadata needed to deanonymize masked text.
+	// ResponseMetadata stores provider-specific metadata needed to process responses.
+	// For example, this may contain data needed to restore masked text.
 	// Only populated when Action == ActionMask.
-	AnonymizationMetadata interface{}
+	ResponseMetadata interface{}
 }
 
 // GuardrailProvider is the interface for inspecting text and applying guardrails.
 type GuardrailProvider interface {
-	// Inspect analyzes the provided text and returns the action to take.
-	Inspect(ctx context.Context, text string) (*Result, error)
-	// Deanonymize restores masked text to its original form using anonymization metadata.
-	Deanonymize(ctx context.Context, maskedText string, metadata interface{}) (string, error)
+	// ProcessRequest analyzes the provided text and returns the action to take.
+	ProcessRequest(ctx context.Context, text string) (*Result, error)
+	// ProcessResponse restores processed text using metadata from ProcessRequest.
+	// For example, this may restore masked text to its original form.
+	ProcessResponse(ctx context.Context, processedText string, metadata interface{}) (string, error)
 }

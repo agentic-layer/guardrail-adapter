@@ -10,7 +10,7 @@ import (
 	"github.com/agentic-layer/guardrail-adapter/internal/provider"
 )
 
-func TestPresidioProvider_Inspect(t *testing.T) {
+func TestPresidioProvider_ProcessRequest(t *testing.T) {
 	tests := []struct {
 		name           string
 		config         Config
@@ -315,7 +315,7 @@ func TestPresidioProvider_Inspect(t *testing.T) {
 			provider := New(tt.config)
 
 			// Execute test
-			result, err := provider.Inspect(context.Background(), tt.text)
+			result, err := provider.ProcessRequest(context.Background(), tt.text)
 
 			// Verify error
 			if tt.expectError {
@@ -525,7 +525,7 @@ func TestPresidioProvider_determineAction(t *testing.T) {
 	}
 }
 
-func TestPresidioProvider_Deanonymize(t *testing.T) {
+func TestPresidioProvider_ProcessResponse(t *testing.T) {
 	tests := []struct {
 		name           string
 		maskedText     string
@@ -606,7 +606,7 @@ func TestPresidioProvider_Deanonymize(t *testing.T) {
 				httpClient: &http.Client{},
 			}
 
-			result, err := p.Deanonymize(context.Background(), tt.maskedText, tt.metadata)
+			result, err := p.ProcessResponse(context.Background(), tt.maskedText, tt.metadata)
 
 			if tt.expectError {
 				if err == nil {

@@ -119,8 +119,8 @@ func New(config Config) *Provider {
 	}
 }
 
-// Inspect analyzes the provided text using Presidio and returns the action to take.
-func (p *Provider) Inspect(ctx context.Context, text string) (*provider.Result, error) {
+// ProcessRequest analyzes the provided text using Presidio and returns the action to take.
+func (p *Provider) ProcessRequest(ctx context.Context, text string) (*provider.Result, error) {
 	// Prepare the analyze request
 	reqBody := analyzeRequest{
 		Text:     text,
@@ -258,9 +258,9 @@ func (p *Provider) determineAction(ctx context.Context, text string, results []r
 			}
 		}
 		return &provider.Result{
-			Action:                provider.ActionMask,
-			MaskedText:            maskedText,
-			AnonymizationMetadata: anonymizeItems,
+			Action:           provider.ActionMask,
+			MaskedText:       maskedText,
+			ResponseMetadata: anonymizeItems,
 		}
 	}
 
@@ -346,8 +346,8 @@ func (p *Provider) anonymizeText(ctx context.Context, text string, results []rec
 	return anonymizeResp.Text, anonymizeResp.Items, nil
 }
 
-// Deanonymize restores masked text to its original form using Presidio's /deanonymize endpoint.
-func (p *Provider) Deanonymize(ctx context.Context, maskedText string, metadata interface{}) (string, error) {
+// ProcessResponse restores masked text to its original form using Presidio's /deanonymize endpoint.
+func (p *Provider) ProcessResponse(ctx context.Context, maskedText string, metadata interface{}) (string, error) {
 	// Convert metadata to anonymize items
 	items, ok := metadata.([]anonymizeResponseItem)
 	if !ok {
