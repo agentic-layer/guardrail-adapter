@@ -2,13 +2,18 @@ package extproc
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // mockProcessStream is a mock implementation of ExternalProcessor_ProcessServer.
@@ -232,4 +237,334 @@ func TestProcessSendError(t *testing.T) {
 	if st.Code() != codes.Unknown {
 		t.Errorf("expected code %v, got %v", codes.Unknown, st.Code())
 	}
+}
+
+// TestGuardrailIntegration tests the complete guardrail processing pipeline.
+func TestGuardrailIntegration(t *testing.T) {
+	// Setup mock Presidio server
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	testCases := []struct {
+		name         string
+		metadata     map[string]string
+		requestBody  string
+		wantBlocked  bool
+		wantMasked   bool
+		wantOriginal bool
+	}{
+		{
+			name:     "passthrough_no_metadata",
+			metadata: map[string]string{
+				// No guardrail metadata
+			},
+			requestBody:  `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test","arguments":{"text":"hello world"}}}`,
+			wantOriginal: true,
+		},
+		{
+			name: "passthrough_non_tools_call",
+			metadata: map[string]string{
+				"guardrail.provider": "presidio-api",
+				"guardrail.mode":     "pre_call",
+			},
+			requestBody:  `{"jsonrpc":"2.0","id":1,"method":"other/method","params":{"name":"test"}}`,
+			wantOriginal: true,
+		},
+		{
+			name: "block_with_ssn",
+			metadata: map[string]string{
+				"guardrail.provider":                  "presidio-api",
+				"guardrail.mode":                      "pre_call",
+				"guardrail.presidio.endpoint":         presidioServer.URL,
+				"guardrail.presidio.language":         "en",
+				"guardrail.presidio.score_thresholds": `{"ALL":0.5}`,
+				"guardrail.presidio.entity_actions":   `{"US_SSN":"BLOCK"}`,
+			},
+			requestBody: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test","arguments":{"ssn":"123-45-6789"}}}`,
+			wantBlocked: true,
+		},
+		{
+			name: "mask_with_email",
+			metadata: map[string]string{
+				"guardrail.provider":                  "presidio-api",
+				"guardrail.mode":                      "pre_call",
+				"guardrail.presidio.endpoint":         presidioServer.URL,
+				"guardrail.presidio.language":         "en",
+				"guardrail.presidio.score_thresholds": `{"ALL":0.5}`,
+				"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+			},
+			requestBody: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test","arguments":{"email":"john@example.com"}}}`,
+			wantMasked:  true,
+		},
+		{
+			name: "allow_no_pii",
+			metadata: map[string]string{
+				"guardrail.provider":                  "presidio-api",
+				"guardrail.mode":                      "pre_call",
+				"guardrail.presidio.endpoint":         presidioServer.URL,
+				"guardrail.presidio.language":         "en",
+				"guardrail.presidio.score_thresholds": `{"ALL":0.5}`,
+				"guardrail.presidio.entity_actions":   `{"ALL":"BLOCK"}`,
+			},
+			requestBody:  `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test","arguments":{"text":"hello world"}}}`,
+			wantOriginal: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			runGuardrailTestCase(t, tc)
+		})
+	}
+}
+
+// createMockPresidioServer creates a mock Presidio server for testing.
+func createMockPresidioServer(t *testing.T) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/analyze":
+			handleMockAnalyzeRequest(t, w, r)
+		case "/anonymize":
+			handleMockAnonymizeRequest(t, w, r)
+		}
+	}))
+}
+
+// handleMockAnalyzeRequest handles /analyze requests for the mock server.
+func handleMockAnalyzeRequest(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	var req map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		t.Fatalf("failed to decode analyze request: %v", err)
+	}
+
+	text := req["text"].(string)
+	var results []interface{}
+
+	// Detect PII in the text
+	if contains(text, "john@example.com") {
+		results = append(results, map[string]interface{}{
+			"entity_type": "EMAIL_ADDRESS",
+			"start":       findIndex(text, "john@example.com"),
+			"end":         findIndex(text, "john@example.com") + len("john@example.com"),
+			"score":       0.95,
+		})
+	}
+	if contains(text, "123-45-6789") {
+		results = append(results, map[string]interface{}{
+			"entity_type": "US_SSN",
+			"start":       findIndex(text, "123-45-6789"),
+			"end":         findIndex(text, "123-45-6789") + len("123-45-6789"),
+			"score":       0.95,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(results); err != nil {
+		t.Fatalf("failed to encode analyze response: %v", err)
+	}
+}
+
+// handleMockAnonymizeRequest handles /anonymize requests for the mock server.
+func handleMockAnonymizeRequest(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	var req map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		t.Fatalf("failed to decode anonymize request: %v", err)
+	}
+
+	text := req["text"].(string)
+	results := req["analyzer_results"].([]interface{})
+
+	// Replace detected entities with placeholders
+	for _, result := range results {
+		entityMap := result.(map[string]interface{})
+		entityType := entityMap["entity_type"].(string)
+		text = replaceAll(text, entityType)
+	}
+
+	// Build response items
+	items := make([]interface{}, len(results))
+	for i, result := range results {
+		entityMap := result.(map[string]interface{})
+		items[i] = map[string]interface{}{
+			"start":       entityMap["start"],
+			"end":         entityMap["end"],
+			"entity_type": entityMap["entity_type"],
+			"text":        "<" + entityMap["entity_type"].(string) + ">",
+			"operator":    "replace",
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"text":  text,
+		"items": items,
+	}); err != nil {
+		t.Fatalf("failed to encode anonymize response: %v", err)
+	}
+}
+
+// runGuardrailTestCase runs a single guardrail test case.
+func runGuardrailTestCase(t *testing.T, tc struct {
+	name         string
+	metadata     map[string]string
+	requestBody  string
+	wantBlocked  bool
+	wantMasked   bool
+	wantOriginal bool
+}) {
+	server := NewServer()
+
+	// Create metadata context
+	var metadataCtx *corev3.Metadata
+	if len(tc.metadata) > 0 {
+		fields := make(map[string]*structpb.Value)
+		for k, v := range tc.metadata {
+			fields[k] = structpb.NewStringValue(v)
+		}
+		metadataCtx = &corev3.Metadata{
+			FilterMetadata: map[string]*structpb.Struct{
+				"envoy.filters.http.ext_proc": {
+					Fields: fields,
+				},
+			},
+		}
+	}
+
+	// Create stream with headers + body
+	requests := []*extprocv3.ProcessingRequest{
+		{
+			Request: &extprocv3.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extprocv3.HttpHeaders{},
+			},
+			MetadataContext: metadataCtx,
+		},
+		{
+			Request: &extprocv3.ProcessingRequest_RequestBody{
+				RequestBody: &extprocv3.HttpBody{
+					Body: []byte(tc.requestBody),
+				},
+			},
+			MetadataContext: metadataCtx,
+		},
+	}
+
+	stream := &mockProcessStream{
+		ctx:      context.Background(),
+		requests: requests,
+		sent:     []*extprocv3.ProcessingResponse{},
+	}
+
+	err := server.Process(stream)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	if len(stream.sent) != 2 {
+		t.Fatalf("sent %d responses, want 2", len(stream.sent))
+	}
+
+	// Check body response
+	bodyResp := stream.sent[1]
+
+	if tc.wantBlocked {
+		verifyBlockedResponse(t, bodyResp)
+	} else if tc.wantMasked {
+		verifyMaskedResponse(t, bodyResp, tc.requestBody)
+	} else if tc.wantOriginal {
+		verifyPassthroughResponse(t, bodyResp)
+	}
+}
+
+// verifyBlockedResponse verifies that the response is an ImmediateResponse with 403.
+func verifyBlockedResponse(t *testing.T, bodyResp *extprocv3.ProcessingResponse) {
+	immResp, ok := bodyResp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
+	if !ok {
+		t.Errorf("expected ImmediateResponse, got %T", bodyResp.Response)
+		return
+	}
+
+	if immResp.ImmediateResponse.Status.Code != 403 {
+		t.Errorf("expected status code 403, got %d", immResp.ImmediateResponse.Status.Code)
+	}
+
+	// Verify error body contains GUARDRAIL_VIOLATION
+	var errorBody map[string]interface{}
+	if err := json.Unmarshal(immResp.ImmediateResponse.Body, &errorBody); err == nil {
+		if errorObj, ok := errorBody["error"].(map[string]interface{}); ok {
+			if code, ok := errorObj["code"].(string); !ok || code != "GUARDRAIL_VIOLATION" {
+				t.Errorf("expected error code GUARDRAIL_VIOLATION, got %v", code)
+			}
+		}
+	}
+}
+
+// verifyMaskedResponse verifies that the response contains a BodyMutation.
+func verifyMaskedResponse(t *testing.T, bodyResp *extprocv3.ProcessingResponse, originalBody string) {
+	bodyRespTyped, ok := bodyResp.Response.(*extprocv3.ProcessingResponse_RequestBody)
+	if !ok {
+		t.Errorf("expected RequestBody response, got %T", bodyResp.Response)
+		return
+	}
+
+	if bodyRespTyped.RequestBody.Response == nil || bodyRespTyped.RequestBody.Response.BodyMutation == nil {
+		t.Error("expected BodyMutation in response")
+		return
+	}
+
+	mutatedBody := bodyRespTyped.RequestBody.Response.BodyMutation.GetBody()
+	if len(mutatedBody) == 0 {
+		t.Error("expected non-empty mutated body")
+	}
+
+	// Verify the body is different from original
+	if string(mutatedBody) == originalBody {
+		t.Error("expected mutated body to be different from original")
+	}
+}
+
+// verifyPassthroughResponse verifies that the response is a passthrough (no mutation).
+func verifyPassthroughResponse(t *testing.T, bodyResp *extprocv3.ProcessingResponse) {
+	bodyRespTyped, ok := bodyResp.Response.(*extprocv3.ProcessingResponse_RequestBody)
+	if !ok {
+		t.Errorf("expected RequestBody response, got %T", bodyResp.Response)
+		return
+	}
+
+	if bodyRespTyped.RequestBody.Response != nil && bodyRespTyped.RequestBody.Response.BodyMutation != nil {
+		t.Error("expected passthrough (no BodyMutation), but got mutation")
+	}
+}
+
+// Helper functions for the test
+func contains(s, substr string) bool {
+	return findIndex(s, substr) != -1
+}
+
+func findIndex(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
+}
+
+func replaceAll(s, entityType string) string {
+	placeholder := "<" + entityType + ">"
+	// Simple replacement logic for test
+	switch entityType {
+	case "EMAIL_ADDRESS":
+		s = replaceSubstring(s, "john@example.com", placeholder)
+	case "US_SSN":
+		s = replaceSubstring(s, "123-45-6789", placeholder)
+	}
+	return s
+}
+
+func replaceSubstring(s, old, new string) string {
+	idx := findIndex(s, old)
+	if idx == -1 {
+		return s
+	}
+	return s[:idx] + new + s[idx+len(old):]
 }
