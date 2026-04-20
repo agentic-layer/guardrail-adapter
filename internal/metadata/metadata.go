@@ -6,6 +6,16 @@ import (
 	"strings"
 )
 
+// Mode represents when guardrail inspection should occur.
+type Mode string
+
+const (
+	// ModePreCall inspects request bodies before they are sent upstream.
+	ModePreCall Mode = "pre_call"
+	// ModePostCall inspects response bodies before they are sent downstream.
+	ModePostCall Mode = "post_call"
+)
+
 const (
 	// Common metadata key prefixes
 	keyPrefix   = "guardrail."
@@ -23,7 +33,7 @@ const (
 // GuardrailConfig represents the parsed guardrail configuration.
 type GuardrailConfig struct {
 	Provider string
-	Modes    []string
+	Modes    []Mode
 	Presidio *PresidioConfig
 }
 
@@ -65,17 +75,17 @@ func ParseGuardrailConfig(fields map[string]string) (*GuardrailConfig, error) {
 	return config, nil
 }
 
-// parseModes parses the comma-separated mode string into a slice.
-func parseModes(modeStr string) []string {
+// parseModes parses the comma-separated mode string into a slice of Mode types.
+func parseModes(modeStr string) []Mode {
 	if modeStr == "" {
-		return []string{}
+		return []Mode{}
 	}
 
-	modes := []string{}
+	modes := []Mode{}
 	for _, mode := range strings.Split(modeStr, ",") {
 		mode = strings.TrimSpace(mode)
 		if mode != "" {
-			modes = append(modes, mode)
+			modes = append(modes, Mode(mode))
 		}
 	}
 	return modes
