@@ -67,46 +67,28 @@ The project includes end-to-end tests that verify the adapter working with Presi
 
 1. Start all services using Docker Compose:
 
-```bash
-docker compose up -d
-```
+    ```bash
+    docker compose up -d
+    ```
 
-2. Wait for all services to be healthy (this may take 10-20 seconds), then run the e2e test script:
+2. Then run the e2e test script:
 
-```bash
-./test/e2e.sh
-```
-
-The test script will:
-- Verify the adapter's HTTP health endpoint
-- Check gRPC health status (if grpcurl is available)
-- Test Presidio Analyzer connectivity and PII detection
-- Verify ext_proc service registration
+    ```bash
+    ./test/e2e.sh
+    ```
 
 3. View service logs if tests fail:
 
-```bash
-# View all service logs
-docker compose logs
-
-# View specific service logs
-docker compose logs adapter
-docker compose logs presidio-analyzer
-docker compose logs presidio-anonymizer
-```
+    ```bash
+    # View all service logs
+    docker compose logs
+    ```
 
 4. Stop and clean up services:
 
-```bash
-docker compose down
-```
-
-#### E2E Test Architecture
-
-The e2e test environment includes:
-- **adapter**: The guardrail adapter service (built from local source)
-- **presidio-analyzer**: PII detection service from [agentic-layer/presidio](https://github.com/agentic-layer/presidio)
-- **presidio-anonymizer**: PII anonymization service from [agentic-layer/presidio](https://github.com/agentic-layer/presidio)
+    ```bash
+    docker compose down
+    ```
 
 ### Run the Adapter
 
