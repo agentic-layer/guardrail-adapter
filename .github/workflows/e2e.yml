@@ -1,0 +1,105 @@
+name: E2E Tests
+
+on:
+  push:
+    branches:
+      - main
+      - 'renovate/**'
+  pull_request:
+
+jobs:
+  e2e:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install grpcurl
+        run: |
+          GRPCURL_VERSION=1.9.1
+          curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" | \
+            sudo tar -xz -C /usr/local/bin grpcurl
+          grpcurl --version
+
+      - name: Start services with Docker Compose
+        run: |
+          docker compose up -d
+          echo "Waiting for services to be ready..."
+
+          # Wait for Presidio services to be healthy (max 120 seconds)
+          timeout 120 bash -c '
+            while true; do
+              presidio_analyzer_health=$(docker compose ps presidio-analyzer --format json | jq -r ".[0].Health")
+              presidio_anonymizer_health=$(docker compose ps presidio-anonymizer --format json | jq -r ".[0].Health")
+
+              echo "Service health status:"
+              echo "  presidio-analyzer: $presidio_analyzer_health"
+              echo "  presidio-anonymizer: $presidio_anonymizer_health"
+
+              if [ "$presidio_analyzer_health" = "healthy" ] && \
+                 [ "$presidio_anonymizer_health" = "healthy" ]; then
+                echo "Presidio services are healthy!"
+                break
+              fi
+
+              sleep 5
+            done
+          ' || {
+            echo "Services did not become healthy in time"
+            echo "=== Docker Compose Status ==="
+            docker compose ps
+            echo ""
+            echo "=== Adapter Logs ==="
+            docker compose logs adapter
+            echo ""
+            echo "=== Presidio Analyzer Logs ==="
+            docker compose logs presidio-analyzer
+            echo ""
+            echo "=== Presidio Anonymizer Logs ==="
+            docker compose logs presidio-anonymizer
+            exit 1
+          }
+
+          # Wait additional time for adapter to start (it starts after Presidio services)
+          echo "Waiting for adapter to start..."
+          sleep 10
+
+          # Show final status
+          echo "=== Final Docker Compose Status ==="
+          docker compose ps
+
+      - name: Run e2e tests
+        run: |
+          ./test/e2e.sh
+        env:
+          # Ensure script fails on error
+          BASH_XTRACEFD: 1
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Docker Compose Status ==="
+          docker compose ps
+          echo ""
+          echo "=== Adapter Logs ==="
+          docker compose logs adapter
+          echo ""
+          echo "=== Presidio Analyzer Logs ==="
+          docker compose logs presidio-analyzer
+          echo ""
+          echo "=== Presidio Anonymizer Logs ==="
+          docker compose logs presidio-anonymizer
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose down -v
