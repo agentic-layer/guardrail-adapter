@@ -1,0 +1,53 @@
+name: E2E Tests
+
+on:
+  push:
+    branches:
+      - main
+      - 'renovate/**'
+  pull_request:
+
+jobs:
+  e2e:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install grpcurl
+        run: |
+          GRPCURL_VERSION=1.9.1
+          curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" | \
+            sudo tar -xz -C /usr/local/bin grpcurl
+          grpcurl --version
+
+      - name: Start services with Docker Compose
+        run: |
+          docker compose up --build --wait
+
+      - name: Run e2e tests
+        run: |
+          ./test/e2e.sh
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Docker Compose Status ==="
+          docker compose ps
+          echo ""
+          echo "=== Logs ==="
+          docker compose logs
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose down -v

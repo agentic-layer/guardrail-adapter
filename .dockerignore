@@ -25,6 +25,7 @@ vendor/
 go.work
 go.work.sum
 .env
+compose.yml
 
 # IDE
 .idea/

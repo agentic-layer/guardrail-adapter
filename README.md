@@ -53,6 +53,43 @@ make fmt
 make vet
 ```
 
+### End-to-End Testing
+
+The project includes end-to-end tests that verify the adapter working with Presidio guardrail services. The e2e tests use Docker Compose to orchestrate all required services.
+
+#### Prerequisites for E2E Tests
+
+- Docker and Docker Compose
+- `curl` (for HTTP requests)
+- `grpcurl` (optional, for gRPC health checks) - Install from https://github.com/fullstorydev/grpcurl
+
+#### Running E2E Tests Locally
+
+1. Start all services using Docker Compose:
+
+    ```bash
+    docker compose up -d
+    ```
+
+2. Then run the e2e test script:
+
+    ```bash
+    ./test/e2e.sh
+    ```
+
+3. View service logs if tests fail:
+
+    ```bash
+    # View all service logs
+    docker compose logs
+    ```
+
+4. Stop and clean up services:
+
+    ```bash
+    docker compose down
+    ```
+
 ### Run the Adapter
 
 ```bash
@@ -113,7 +150,8 @@ curl http://localhost:8080/health
 The project uses GitHub Actions for continuous integration:
 
 - **Lint**: Runs on all PRs and pushes to main/renovate branches
-- **Test**: Executes test suite with coverage reporting
+- **Test**: Executes unit test suite with coverage reporting
+- **E2E**: Runs end-to-end tests with Docker Compose and Presidio services
 - **Publish**: Builds and publishes multi-platform Docker images to GitHub Container Registry
 
 Images are automatically published on:
