@@ -6,7 +6,6 @@ services:
       dockerfile: Dockerfile
     ports:
       - "9001:9001"
-      - "8080:8080"
     environment:
       - LOG_LEVEL=info
     command: ["--addr", ":9001", "--health-addr", ":8080"]
