@@ -168,7 +168,8 @@ curl http://localhost:8080/health
 The project uses GitHub Actions for continuous integration:
 
 - **Lint**: Runs on all PRs and pushes to main/renovate branches
-- **Test**: Executes test suite with coverage reporting
+- **Test**: Executes unit test suite with coverage reporting
+- **E2E**: Runs end-to-end tests with Docker Compose and Presidio services
 - **Publish**: Builds and publishes multi-platform Docker images to GitHub Container Registry
 
 Images are automatically published on:
