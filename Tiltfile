@@ -18,3 +18,12 @@ helm_resource(
 docker_build('guardrail-adapter-local', '.', dockerfile='Dockerfile')
 
 k8s_yaml(kustomize('deploy/local'))
+
+k8s_resource('envoy-default-eg',
+             port_forwards='10000:80',
+             labels=['gateway'],
+             resource_deps=['envoy-gateway'])
+
+k8s_resource('echo-mcp', labels=['mcp'])
+k8s_resource('presidio', labels=['guardrails'])
+k8s_resource('guardrail-adapter', labels=['guardrails'])
