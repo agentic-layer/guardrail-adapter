@@ -4,3 +4,4 @@ kind: Kustomization
 resources:
   - namespaces.yaml
   - presidio.yaml
+  - echo-mcp.yaml
