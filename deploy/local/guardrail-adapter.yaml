@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guardrail-adapter
+  namespace: guardrails
+  labels:
+    app: guardrail-adapter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: guardrail-adapter
+  template:
+    metadata:
+      labels:
+        app: guardrail-adapter
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: guardrail-adapter
+          image: guardrail-adapter-local:dev
+          imagePullPolicy: Never
+          args:
+            - --addr=:9001
+            - --health-addr=:8080
+          ports:
+            - name: ext-proc
+              containerPort: 9001
+            - name: health
+              containerPort: 8080
+          env:
+            - name: LOG_LEVEL
+              value: info
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guardrail-adapter
+  namespace: guardrails
+spec:
+  selector:
+    app: guardrail-adapter
+  ports:
+    - name: ext-proc
+      port: 9001
+      targetPort: 9001
+      appProtocol: kubernetes.io/h2c
