@@ -5,3 +5,4 @@ resources:
   - namespaces.yaml
   - presidio.yaml
   - echo-mcp.yaml
+  - guardrail-adapter.yaml

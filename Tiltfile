@@ -15,4 +15,6 @@ helm_resource(
     labels=['gateway'],
 )
 
+docker_build('guardrail-adapter-local', '.', dockerfile='Dockerfile')
+
 k8s_yaml(kustomize('deploy/local'))
