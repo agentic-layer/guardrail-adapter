@@ -1,0 +1,24 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyPatchPolicy
+metadata:
+  name: guardrail-route-metadata
+  namespace: default
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: eg
+  type: JSONPatch
+  jsonPatches:
+    - type: "type.googleapis.com/envoy.config.route.v3.RouteConfiguration"
+      name: "default/eg/http"
+      operation:
+        op: add
+        path: "/virtual_hosts/0/routes/0/metadata/filter_metadata/envoy.filters.http.ext_proc"
+        value:
+          guardrail.provider: "presidio-api"
+          guardrail.mode: "pre_call"
+          guardrail.presidio.endpoint: "http://presidio.guardrail-providers:80"
+          guardrail.presidio.language: "en"
+          guardrail.presidio.score_thresholds: "{\"ALL\":0.5}"
+          guardrail.presidio.entity_actions: "{\"EMAIL_ADDRESS\":\"MASK\"}"
