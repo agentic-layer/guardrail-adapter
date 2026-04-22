@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-mcp
+  namespace: default
+  labels:
+    app: echo-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-mcp
+  template:
+    metadata:
+      labels:
+        app: echo-mcp
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: echo-mcp
+          image: ghcr.io/agentic-layer/echo-mcp-server:0.3.0
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-mcp
+  namespace: default
+spec:
+  selector:
+    app: echo-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
