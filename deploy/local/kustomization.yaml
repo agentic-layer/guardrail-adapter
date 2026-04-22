@@ -8,3 +8,5 @@ resources:
   - guardrail-adapter.yaml
   - gateway.yaml
   - httproute.yaml
+  - reference-grant.yaml
+  - ext-proc-policy.yaml

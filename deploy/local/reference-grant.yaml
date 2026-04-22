@@ -1,0 +1,14 @@
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-default-to-guardrail-adapter
+  namespace: guardrails
+spec:
+  from:
+    - group: gateway.envoyproxy.io
+      kind: EnvoyExtensionPolicy
+      namespace: default
+  to:
+    - group: ""
+      kind: Service
+      name: guardrail-adapter
