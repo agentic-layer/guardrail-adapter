@@ -10,6 +10,32 @@ spec:
     name: eg
   type: JSONPatch
   jsonPatches:
+    # Patch 1: Inject a Lua HTTP filter before ext_proc on the listener.
+    # The Lua script adds x-guardrail-* request headers which the adapter reads
+    # via its header-fallback config path. Headers are injected here (not via
+    # HTTPRoute RequestHeaderModifier) because ext_proc runs in the HTTP filter
+    # chain, before route-level header modifications are applied.
+    - type: "type.googleapis.com/envoy.config.listener.v3.Listener"
+      name: "default/eg/http"
+      operation:
+        op: add
+        path: "/default_filter_chain/filters/0/typed_config/http_filters/0"
+        value:
+          name: "envoy.filters.http.lua"
+          typed_config:
+            "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+            inline_code: |
+              function envoy_on_request(h)
+                h:headers():replace('x-guardrail-provider', 'presidio-api')
+                h:headers():replace('x-guardrail-mode', 'pre_call')
+                h:headers():replace('x-guardrail-presidio-endpoint', 'http://presidio.guardrail-providers:80')
+                h:headers():replace('x-guardrail-presidio-language', 'en')
+                h:headers():replace('x-guardrail-presidio-score-thresholds', '{"ALL":0.5}')
+                h:headers():replace('x-guardrail-presidio-entity-actions', '{"EMAIL_ADDRESS":"MASK"}')
+              end
+    # Patch 2: Add guardrail metadata to the route's filter_metadata.
+    # Currently informational only — Envoy's forwarding_namespaces only forwards
+    # dynamic metadata, not route filter_metadata. Kept for future compatibility.
     - type: "type.googleapis.com/envoy.config.route.v3.RouteConfiguration"
       name: "default/eg/http"
       operation:
