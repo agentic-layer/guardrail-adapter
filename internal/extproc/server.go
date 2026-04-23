@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -115,16 +116,27 @@ func (s *Server) handleRequest(ctx context.Context, req *extprocv3.ProcessingReq
 	}
 }
 
-// handleRequestHeaders parses guardrail configuration from metadata.
+// handleRequestHeaders parses guardrail configuration from metadata or request headers.
 func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *streamState) *extprocv3.ProcessingResponse {
-	// Parse metadata if present
+	// Primary: parse config from metadata_context (populated when Envoy forwards dynamic metadata)
 	if req.MetadataContext != nil {
 		config, err := s.parseMetadata(req.MetadataContext)
 		if err != nil {
 			log.Printf("error parsing guardrail metadata: %v", err)
-			// Continue with passthrough if metadata parsing fails
 		} else {
 			state.config = config
+		}
+	}
+
+	// Fallback: read config from x-guardrail-* request headers (set by HTTPRoute RequestHeaderModifier)
+	if state.config == nil {
+		if hdrs := req.GetRequestHeaders(); hdrs != nil {
+			config, err := s.parseGuardrailHeaders(hdrs)
+			if err != nil {
+				log.Printf("error parsing guardrail headers: %v", err)
+			} else {
+				state.config = config
+			}
 		}
 	}
 
@@ -224,6 +236,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{
 					Response: &extprocv3.CommonResponse{
+						HeaderMutation: contentLengthMutation(len(modifiedBody)),
 						BodyMutation: &extprocv3.BodyMutation{
 							Mutation: &extprocv3.BodyMutation_Body{
 								Body: modifiedBody,
@@ -240,6 +253,16 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 		Response: &extprocv3.ProcessingResponse_RequestBody{
 			RequestBody: &extprocv3.BodyResponse{},
 		},
+	}
+}
+
+// contentLengthMutation returns a HeaderMutation that removes the content-length
+// header. Required when mutating the HTTP body so Envoy recomputes the length
+// correctly rather than rejecting with
+// "mismatch_between_content_length_and_the_length_of_the_mutated_body".
+func contentLengthMutation(_ int) *extprocv3.HeaderMutation {
+	return &extprocv3.HeaderMutation{
+		RemoveHeaders: []string{"content-length"},
 	}
 }
 
@@ -345,6 +368,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{
 					Response: &extprocv3.CommonResponse{
+						HeaderMutation: contentLengthMutation(len(modifiedBody)),
 						BodyMutation: &extprocv3.BodyMutation{
 							Mutation: &extprocv3.BodyMutation_Body{
 								Body: modifiedBody,
@@ -362,6 +386,39 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 			ResponseBody: &extprocv3.BodyResponse{},
 		},
 	}
+}
+
+// parseGuardrailHeaders reads guardrail config from x-guardrail-* HTTP request headers.
+// This is a fallback for when metadata_context is absent (e.g. route metadata not in dynamic store).
+func (s *Server) parseGuardrailHeaders(hdrs *extprocv3.HttpHeaders) (*metadata.GuardrailConfig, error) {
+	if hdrs.GetHeaders() == nil {
+		return nil, nil
+	}
+	fields := make(map[string]string)
+	for _, h := range hdrs.GetHeaders().GetHeaders() {
+		val := h.Value
+		if len(h.RawValue) > 0 {
+			val = string(h.RawValue)
+		}
+		switch strings.ToLower(h.Key) {
+		case "x-guardrail-provider":
+			fields["guardrail.provider"] = val
+		case "x-guardrail-mode":
+			fields["guardrail.mode"] = val
+		case "x-guardrail-presidio-endpoint":
+			fields["guardrail.presidio.endpoint"] = val
+		case "x-guardrail-presidio-language":
+			fields["guardrail.presidio.language"] = val
+		case "x-guardrail-presidio-score-thresholds":
+			fields["guardrail.presidio.score_thresholds"] = val
+		case "x-guardrail-presidio-entity-actions":
+			fields["guardrail.presidio.entity_actions"] = val
+		}
+	}
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	return metadata.ParseGuardrailConfig(fields)
 }
 
 // parseMetadata extracts guardrail configuration from ext_proc metadata.
