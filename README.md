@@ -90,6 +90,52 @@ The project includes end-to-end tests that verify the adapter working with Presi
     docker compose down
     ```
 
+#### E2E via Envoy Gateway (Tilt)
+
+A second E2E path exercises the adapter through a real Envoy data plane
+fronted by Envoy Gateway (Kubernetes Gateway API). Unlike the Docker
+Compose path, this validates the full ext_proc wiring against production-
+shape infrastructure.
+
+Prerequisites:
+- A local Kubernetes cluster (kind, Docker Desktop, Colima, etc.) and
+  `kubectl` pointing at it
+- [Tilt](https://tilt.dev/) v0.33+
+- `curl` and `jq`
+
+Run the stack:
+
+```bash
+tilt up
+```
+
+Tilt installs Envoy Gateway v1.7.2, deploys Presidio, echo-mcp-server,
+the guardrail-adapter (built from local sources), plus the Gateway,
+HTTPRoute, EnvoyExtensionPolicy, and EnvoyPatchPolicy manifests. Once
+all resources are green it forwards the Envoy data-plane port to
+`localhost:10000`.
+
+Then run the test script:
+
+```bash
+./test/e2e-gateway.sh
+```
+
+The script sends an MCP `tools/call` for the `echo` tool with a PII
+payload (`"My email is john@example.com"`) through the gateway. It
+asserts that the adapter masked the email (`<EMAIL_ADDRESS>` appears
+in the response and the raw email does not).
+
+Notes:
+- Guardrail configuration is delivered via `x-guardrail-*` request
+  headers set by a Lua filter injected via `EnvoyPatchPolicy`. This is
+  a workaround: Envoy's `forwarding_namespaces` forwards dynamic
+  metadata, not route `filter_metadata`, so route-level metadata alone
+  does not reach the ext_proc server.
+- `EnvoyPatchPolicy` is experimental in Envoy Gateway and its patch
+  paths (Listener filter chain, RouteConfiguration virtual hosts) are
+  sensitive to version bumps.
+
 ### Run the Adapter
 
 ```bash
