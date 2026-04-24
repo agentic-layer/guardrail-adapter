@@ -572,8 +572,9 @@ func replaceSubstring(s, old, new string) string {
 }
 
 func TestStaticConfigShortCircuitsMetadata(t *testing.T) {
+	const testProvider = "presidio-api"
 	staticCfg := &metadata.GuardrailConfig{
-		Provider: "presidio-api",
+		Provider: testProvider,
 		Modes:    []metadata.Mode{metadata.ModePreCall},
 		Presidio: &metadata.PresidioConfig{Endpoint: "http://static:8000"},
 	}
@@ -612,8 +613,8 @@ func TestStaticConfigShortCircuitsMetadata(t *testing.T) {
 	if state.config == nil {
 		t.Fatal("expected state.config to be set from static config, got nil")
 	}
-	if state.config.Provider != "presidio-api" {
-		t.Errorf("provider = %q, want %q (static should win over both metadata and headers)", state.config.Provider, "presidio-api")
+	if state.config.Provider != testProvider {
+		t.Errorf("provider = %q, want %q (static should win over both metadata and headers)", state.config.Provider, testProvider)
 	}
 	if state.config.Presidio == nil || state.config.Presidio.Endpoint != "http://static:8000" {
 		t.Errorf("endpoint = %#v, want %q", state.config.Presidio, "http://static:8000")
@@ -621,8 +622,9 @@ func TestStaticConfigShortCircuitsMetadata(t *testing.T) {
 }
 
 func TestStaticConfigWorksWithoutMetadataOrHeaders(t *testing.T) {
+	const testProvider = "presidio-api"
 	staticCfg := &metadata.GuardrailConfig{
-		Provider: "presidio-api",
+		Provider: testProvider,
 		Modes:    []metadata.Mode{metadata.ModePreCall},
 		Presidio: &metadata.PresidioConfig{Endpoint: "http://static:8000"},
 	}
@@ -634,7 +636,7 @@ func TestStaticConfigWorksWithoutMetadataOrHeaders(t *testing.T) {
 		},
 	}
 	_ = server.handleRequestHeaders(req, state)
-	if state.config == nil || state.config.Provider != "presidio-api" {
+	if state.config == nil || state.config.Provider != testProvider {
 		t.Fatalf("expected static config applied, got %#v", state.config)
 	}
 }
