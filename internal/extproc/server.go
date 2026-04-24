@@ -128,7 +128,8 @@ func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *s
 		}
 	}
 
-	// Fallback: read config from x-guardrail-* request headers (set by HTTPRoute RequestHeaderModifier)
+	// Fallback: read config from x-guardrail-* request headers injected by the gateway's
+	// Lua HTTP filter via EnvoyPatchPolicy so they are visible to ext_proc.
 	if state.config == nil {
 		if hdrs := req.GetRequestHeaders(); hdrs != nil {
 			config, err := s.parseGuardrailHeaders(hdrs)
