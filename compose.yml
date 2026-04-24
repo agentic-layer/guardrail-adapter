@@ -1,5 +1,5 @@
 services:
-  # Guardrail Adapter service
+  # Guardrail Adapter service (metadata mode)
   adapter:
     build:
       context: .
@@ -8,7 +8,20 @@ services:
       - "9001:9001"
     environment:
       - LOG_LEVEL=info
-      - GUARDRAIL_CONFIG_FILE
+    command: ["--addr", ":9001", "--health-addr", ":8080"]
+    depends_on:
+      - presidio
+
+  # Guardrail Adapter service (static config mode)
+  adapter-static:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "9002:9001"
+    environment:
+      - LOG_LEVEL=info
+      - GUARDRAIL_CONFIG_FILE=/etc/guardrail/config.yaml
     volumes:
       - ./test/static-config.yaml:/etc/guardrail/config.yaml:ro
     command: ["--addr", ":9001", "--health-addr", ":8080"]

@@ -1,0 +1,22 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: guardrail-extproc-static
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: echo-mcp-static
+  extProc:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: guardrail-adapter-static
+          namespace: guardrails
+          port: 9001
+      processingMode:
+        request:
+          body: Buffered
+      messageTimeout: 5s
+      failOpen: false

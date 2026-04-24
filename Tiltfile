@@ -17,8 +17,7 @@ helm_resource(
 
 docker_build('guardrail-adapter-local', '.', dockerfile='Dockerfile')
 
-overlay = os.environ.get('GUARDRAIL_ADAPTER_OVERLAY', 'deploy/local')
-k8s_yaml(kustomize(overlay))
+k8s_yaml(kustomize('deploy/local'))
 
 # Gateway-API and Envoy Gateway custom resources depend on CRDs installed by
 # the envoy-gateway Helm chart. Group them so Tilt waits for that install
@@ -26,12 +25,14 @@ k8s_yaml(kustomize(overlay))
 gateway_objects = [
     'eg:gatewayclass',
     'eg:gateway:default',
+    'eg-static:gateway:default',
     'echo-mcp:httproute:default',
+    'echo-mcp-static:httproute:default',
     'allow-default-to-guardrail-adapter:referencegrant:guardrails',
     'guardrail-extproc:envoyextensionpolicy:default',
+    'guardrail-extproc-static:envoyextensionpolicy:default',
+    'guardrail-route-metadata:envoypatchpolicy:default',
 ]
-if overlay == 'deploy/local':
-    gateway_objects.append('guardrail-route-metadata:envoypatchpolicy:default')
 
 k8s_resource(
     new_name='gateway-config',
@@ -63,3 +64,4 @@ kubectl -n envoy-gateway-system wait --for=condition=ready pod -l gateway.envoyp
 k8s_resource('echo-mcp', labels=['mcp'])
 k8s_resource('presidio', labels=['guardrails'])
 k8s_resource('guardrail-adapter', labels=['guardrails'])
+k8s_resource('guardrail-adapter-static', labels=['guardrails'])

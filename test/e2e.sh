@@ -8,7 +8,13 @@ NC='\033[0m'
 # Accept mode as first argument: "metadata" (default) or "static"
 MODE="${1:-metadata}"
 
-ADAPTER_GRPC_ADDR="localhost:9001"
+# Set the adapter address based on mode
+if [ "$MODE" = "static" ]; then
+    ADAPTER_GRPC_ADDR="localhost:9002"
+else
+    ADAPTER_GRPC_ADDR="localhost:9001"
+fi
+
 PRESIDIO_ENDPOINT="http://presidio:8000"
 
 log_info() {

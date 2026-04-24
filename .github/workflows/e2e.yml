@@ -8,14 +8,11 @@ on:
   pull_request:
 
 jobs:
-  e2e:
-    name: End-to-End Tests (${{ matrix.mode }})
+  compose-e2e:
+    name: End-to-End Tests (Compose)
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
-    strategy:
-      matrix:
-        mode: [metadata, static]
 
     steps:
       - name: Clone the code
@@ -34,14 +31,16 @@ jobs:
           grpcurl --version
 
       - name: Start services with Docker Compose
-        env:
-          GUARDRAIL_CONFIG_FILE: ${{ matrix.mode == 'static' && '/etc/guardrail/config.yaml' || '' }}
         run: |
           docker compose up --build --wait
 
-      - name: Run e2e tests
+      - name: Run metadata mode e2e tests
         run: |
-          ./test/e2e.sh ${{ matrix.mode }}
+          ./test/e2e.sh metadata
+
+      - name: Run static mode e2e tests
+        run: |
+          ./test/e2e.sh static
 
       - name: Show logs on failure
         if: failure()
@@ -99,7 +98,34 @@ jobs:
           cat /tmp/port-forward.log >&2
           exit 1
 
-      - name: Run gateway e2e tests
+      - name: Run metadata mode gateway e2e tests
+        run: ./test/e2e-gateway.sh
+
+      - name: Port-forward Envoy data plane (static)
+        run: |
+          # Kill previous port-forward
+          if [ -f /tmp/port-forward.pid ]; then
+            kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
+          fi
+
+          GATEWAY_SVC=$(kubectl -n envoy-gateway-system get svc \
+            -l gateway.envoyproxy.io/owning-gateway-name=eg-static \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n envoy-gateway-system port-forward \
+            "svc/$GATEWAY_SVC" 10000:80 >/tmp/port-forward-static.log 2>&1 &
+          echo $! > /tmp/port-forward-static.pid
+          for i in {1..30}; do
+            if nc -z localhost 10000; then
+              echo "port-forward ready on :10000"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "port-forward did not become ready" >&2
+          cat /tmp/port-forward-static.log >&2
+          exit 1
+
+      - name: Run static mode gateway e2e tests
         run: ./test/e2e-gateway.sh
 
       - name: Show logs on failure
@@ -113,6 +139,9 @@ jobs:
           echo ""
           echo "=== guardrail-adapter logs ==="
           kubectl -n guardrails logs -l app=guardrail-adapter --tail=200 || true
+          echo ""
+          echo "=== guardrail-adapter-static logs ==="
+          kubectl -n guardrails logs -l app=guardrail-adapter-static --tail=200 || true
           echo ""
           echo "=== echo-mcp logs ==="
           kubectl -n default logs -l app=echo-mcp --tail=200 || true
@@ -125,11 +154,17 @@ jobs:
             -l gateway.envoyproxy.io/owning-gateway-name=eg \
             --all-containers --tail=200 || true
           echo ""
+          echo "=== envoy data plane logs (static) ==="
+          kubectl -n envoy-gateway-system logs \
+            -l gateway.envoyproxy.io/owning-gateway-name=eg-static \
+            --all-containers --tail=200 || true
+          echo ""
           echo "=== envoy-gateway controller logs ==="
           kubectl -n envoy-gateway-system logs -l control-plane=envoy-gateway --tail=200 || true
           echo ""
           echo "=== port-forward log ==="
           cat /tmp/port-forward.log 2>/dev/null || true
+          cat /tmp/port-forward-static.log 2>/dev/null || true
 
       - name: Cleanup
         if: always()
@@ -137,80 +172,6 @@ jobs:
           if [ -f /tmp/port-forward.pid ]; then
             kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
           fi
-
-  gateway-e2e-static:
-    name: End-to-End Tests (Static Config, Envoy Gateway)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: 'read'
-
-    steps:
-      - name: Clone the code
-        uses: actions/checkout@v6
-
-      - name: Setup mise
-        uses: jdx/mise-action@v2
-        with:
-          install: true
-
-      - name: Create kind cluster
-        uses: helm/kind-action@v1
-        with:
-          cluster_name: guardrail-e2e-static
-
-      - name: Bring up stack with Tilt (static overlay)
-        env:
-          GUARDRAIL_ADAPTER_OVERLAY: deploy/local-static
-        run: tilt ci --timeout 15m
-
-      - name: Port-forward Envoy data plane
-        run: |
-          GATEWAY_SVC=$(kubectl -n envoy-gateway-system get svc \
-            -l gateway.envoyproxy.io/owning-gateway-name=eg \
-            -o jsonpath='{.items[0].metadata.name}')
-          kubectl -n envoy-gateway-system port-forward \
-            "svc/$GATEWAY_SVC" 10000:80 >/tmp/port-forward.log 2>&1 &
-          echo $! > /tmp/port-forward.pid
-          for i in {1..30}; do
-            if nc -z localhost 10000; then
-              echo "port-forward ready on :10000"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "port-forward did not become ready" >&2
-          cat /tmp/port-forward.log >&2
-          exit 1
-
-      - name: Run gateway static-config e2e tests
-        run: ./test/e2e-gateway.sh
-
-      - name: Show logs on failure
-        if: failure()
-        run: |
-          echo "=== Pods ==="
-          kubectl get pods -A
-          echo ""
-          echo "=== Recent events ==="
-          kubectl get events -A --sort-by=.lastTimestamp | tail -50
-          echo ""
-          echo "=== guardrail-adapter logs ==="
-          kubectl -n guardrails logs -l app=guardrail-adapter --tail=200 || true
-          echo ""
-          echo "=== guardrail-adapter configmap ==="
-          kubectl -n guardrails get configmap guardrail-adapter-config -o yaml || true
-          echo ""
-          echo "=== envoy data plane logs ==="
-          kubectl -n envoy-gateway-system logs \
-            -l gateway.envoyproxy.io/owning-gateway-name=eg \
-            --all-containers --tail=200 || true
-          echo ""
-          echo "=== port-forward log ==="
-          cat /tmp/port-forward.log 2>/dev/null || true
-
-      - name: Cleanup
-        if: always()
-        run: |
-          if [ -f /tmp/port-forward.pid ]; then
-            kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
+          if [ -f /tmp/port-forward-static.pid ]; then
+            kill "$(cat /tmp/port-forward-static.pid)" 2>/dev/null || true
           fi
