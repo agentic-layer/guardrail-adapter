@@ -14,6 +14,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
+
+	"github.com/agentic-layer/guardrail-adapter/internal/metadata"
 )
 
 // mockProcessStream is a mock implementation of ExternalProcessor_ProcessServer.
@@ -567,4 +569,245 @@ func replaceSubstring(s, old, new string) string {
 		return s
 	}
 	return s[:idx] + new + s[idx+len(old):]
+}
+
+// TestHeaderFallbackConfig tests the parseGuardrailHeaders function for extracting
+// guardrail configuration from x-guardrail-* HTTP request headers.
+func TestHeaderFallbackConfig(t *testing.T) {
+	const testProvider = "presidio-api"
+	server := NewServer()
+
+	testCases := []struct {
+		name       string
+		headers    map[string]string
+		wantConfig bool
+		wantError  bool
+		validate   func(*testing.T, *metadata.GuardrailConfig)
+	}{
+		{
+			name:       "no_headers",
+			headers:    map[string]string{},
+			wantConfig: false,
+			wantError:  false,
+		},
+		{
+			name: "complete_presidio_config",
+			headers: map[string]string{
+				"x-guardrail-provider":                  testProvider,
+				"x-guardrail-mode":                      "pre_call",
+				"x-guardrail-presidio-endpoint":         "http://presidio:80",
+				"x-guardrail-presidio-language":         "en",
+				"x-guardrail-presidio-score-thresholds": `{"ALL":0.5}`,
+				"x-guardrail-presidio-entity-actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+			},
+			wantConfig: true,
+			wantError:  false,
+			validate: func(t *testing.T, cfg *metadata.GuardrailConfig) {
+				if cfg.Provider != testProvider {
+					t.Errorf("expected provider '%s', got %s", testProvider, cfg.Provider)
+				}
+				if len(cfg.Modes) != 1 || cfg.Modes[0] != metadata.ModePreCall {
+					t.Errorf("expected mode pre_call, got %v", cfg.Modes)
+				}
+				if cfg.Presidio == nil {
+					t.Fatal("expected presidio config, got nil")
+				}
+				if cfg.Presidio.Endpoint != "http://presidio:80" {
+					t.Errorf("expected endpoint 'http://presidio:80', got %s", cfg.Presidio.Endpoint)
+				}
+				if cfg.Presidio.Language != "en" {
+					t.Errorf("expected language 'en', got %s", cfg.Presidio.Language)
+				}
+			},
+		},
+		{
+			name: "multiple_modes",
+			headers: map[string]string{
+				"x-guardrail-provider":                  testProvider,
+				"x-guardrail-mode":                      "pre_call,post_call",
+				"x-guardrail-presidio-endpoint":         "http://presidio:80",
+				"x-guardrail-presidio-language":         "en",
+				"x-guardrail-presidio-score-thresholds": `{"ALL":0.5}`,
+				"x-guardrail-presidio-entity-actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+			},
+			wantConfig: true,
+			wantError:  false,
+			validate: func(t *testing.T, cfg *metadata.GuardrailConfig) {
+				if len(cfg.Modes) != 2 {
+					t.Errorf("expected 2 modes, got %d", len(cfg.Modes))
+				}
+			},
+		},
+		{
+			name: "case_insensitive_headers",
+			headers: map[string]string{
+				"X-Guardrail-Provider":          testProvider,
+				"X-GUARDRAIL-MODE":              "pre_call",
+				"x-GuardRail-Presidio-Endpoint": "http://presidio:80",
+				"X-GUARDRAIL-PRESIDIO-LANGUAGE": "en",
+			},
+			wantConfig: true,
+			wantError:  false,
+			validate: func(t *testing.T, cfg *metadata.GuardrailConfig) {
+				if cfg.Provider != testProvider {
+					t.Errorf("expected provider '%s', got %s", testProvider, cfg.Provider)
+				}
+			},
+		},
+		{
+			name: "partial_presidio_config",
+			headers: map[string]string{
+				"x-guardrail-provider": testProvider,
+				"x-guardrail-mode":     "pre_call",
+				// Missing endpoint and other fields - still valid, just incomplete
+			},
+			wantConfig: true,
+			wantError:  false,
+			validate: func(t *testing.T, cfg *metadata.GuardrailConfig) {
+				if cfg.Provider != testProvider {
+					t.Errorf("expected provider '%s', got %s", testProvider, cfg.Provider)
+				}
+				if cfg.Presidio == nil {
+					t.Fatal("expected presidio config, got nil")
+				}
+				if cfg.Presidio.Endpoint != "" {
+					t.Errorf("expected empty endpoint, got %s", cfg.Presidio.Endpoint)
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Build HttpHeaders from test headers
+			headers := &extprocv3.HttpHeaders{}
+			if len(tc.headers) > 0 {
+				hdrs := make([]*corev3.HeaderValue, 0, len(tc.headers))
+				for k, v := range tc.headers {
+					hdrs = append(hdrs, &corev3.HeaderValue{
+						Key:   k,
+						Value: v,
+					})
+				}
+				headers.Headers = &corev3.HeaderMap{
+					Headers: hdrs,
+				}
+			}
+
+			config, err := server.parseGuardrailHeaders(headers)
+
+			if tc.wantError {
+				if err == nil {
+					t.Error("expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if tc.wantConfig && config == nil {
+				t.Fatal("expected config, got nil")
+			}
+
+			if !tc.wantConfig && config != nil {
+				t.Fatalf("expected no config, got %+v", config)
+			}
+
+			if tc.validate != nil && config != nil {
+				tc.validate(t, config)
+			}
+		})
+	}
+}
+
+// TestHeaderFallbackInRequestFlow tests that header-fallback config is used when
+// MetadataContext is nil and that body mutations include the content-length removal.
+func TestHeaderFallbackInRequestFlow(t *testing.T) {
+	// Setup mock Presidio server
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	server := NewServer()
+
+	// Create request headers with guardrail config
+	headerValues := []*corev3.HeaderValue{
+		{Key: "x-guardrail-provider", Value: "presidio-api"},
+		{Key: "x-guardrail-mode", Value: "pre_call"},
+		{Key: "x-guardrail-presidio-endpoint", Value: presidioServer.URL},
+		{Key: "x-guardrail-presidio-language", Value: "en"},
+		{Key: "x-guardrail-presidio-score-thresholds", Value: `{"ALL":0.5}`},
+		{Key: "x-guardrail-presidio-entity-actions", Value: `{"EMAIL_ADDRESS":"MASK"}`},
+	}
+
+	requests := []*extprocv3.ProcessingRequest{
+		{
+			Request: &extprocv3.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extprocv3.HttpHeaders{
+					Headers: &corev3.HeaderMap{
+						Headers: headerValues,
+					},
+				},
+			},
+			// No MetadataContext - force header fallback
+			MetadataContext: nil,
+		},
+		{
+			Request: &extprocv3.ProcessingRequest_RequestBody{
+				RequestBody: &extprocv3.HttpBody{
+					Body: []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test","arguments":{"email":"john@example.com"}}}`),
+				},
+			},
+			MetadataContext: nil,
+		},
+	}
+
+	stream := &mockProcessStream{
+		ctx:      context.Background(),
+		requests: requests,
+		sent:     []*extprocv3.ProcessingResponse{},
+	}
+
+	err := server.Process(stream)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	if len(stream.sent) != 2 {
+		t.Fatalf("sent %d responses, want 2", len(stream.sent))
+	}
+
+	// Check that body was mutated
+	bodyResp, ok := stream.sent[1].Response.(*extprocv3.ProcessingResponse_RequestBody)
+	if !ok {
+		t.Fatalf("expected RequestBody response, got %T", stream.sent[1].Response)
+	}
+
+	if bodyResp.RequestBody.Response == nil || bodyResp.RequestBody.Response.BodyMutation == nil {
+		t.Fatal("expected BodyMutation in response")
+	}
+
+	// Verify HeaderMutation removes content-length
+	if bodyResp.RequestBody.Response.HeaderMutation == nil {
+		t.Fatal("expected HeaderMutation in response")
+	}
+
+	removedHeaders := bodyResp.RequestBody.Response.HeaderMutation.RemoveHeaders
+	found := false
+	for _, h := range removedHeaders {
+		if h == "content-length" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected content-length to be removed, but it was not in RemoveHeaders")
+	}
+
+	// Verify body was actually modified
+	mutatedBody := bodyResp.RequestBody.Response.BodyMutation.GetBody()
+	if string(mutatedBody) == string(requests[1].GetRequestBody().Body) {
+		t.Error("expected body to be mutated, but it matches original")
+	}
 }

@@ -100,8 +100,15 @@ shape infrastructure.
 Prerequisites:
 - A local Kubernetes cluster (kind, Docker Desktop, Colima, etc.) and
   `kubectl` pointing at it
-- [Tilt](https://tilt.dev/) v0.33+
+- [Tilt](https://tilt.dev/) v0.33+, `helm`, `kubectl`, and Docker
 - `curl` and `jq`
+
+**Tip:** Install all required tools with pinned versions using [mise](https://mise.jdx.dev/):
+```bash
+mise install
+```
+
+See `.mise.toml` for the pinned tool versions.
 
 Run the stack:
 
