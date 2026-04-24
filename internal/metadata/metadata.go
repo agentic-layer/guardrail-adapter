@@ -138,7 +138,32 @@ func LoadGuardrailConfigFile(path string) (*GuardrailConfig, error) {
 			EntityActions:   raw.Presidio.EntityActions,
 		}
 	}
+	if err := validateGuardrailConfig(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
+}
+
+func validateGuardrailConfig(cfg *GuardrailConfig) error {
+	if cfg.Provider == "" {
+		return fmt.Errorf("provider is required")
+	}
+	if len(cfg.Modes) == 0 {
+		return fmt.Errorf("modes is required and must be non-empty")
+	}
+	for _, m := range cfg.Modes {
+		switch m {
+		case ModePreCall, ModePostCall:
+		default:
+			return fmt.Errorf("unknown mode %q (allowed: pre_call, post_call)", m)
+		}
+	}
+	if cfg.Provider == "presidio-api" {
+		if cfg.Presidio == nil || cfg.Presidio.Endpoint == "" {
+			return fmt.Errorf("presidio.endpoint is required when provider is presidio-api")
+		}
+	}
+	return nil
 }
 
 // parsePresidioConfig extracts Presidio-specific configuration from metadata fields.
