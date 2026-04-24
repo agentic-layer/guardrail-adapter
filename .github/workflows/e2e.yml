@@ -52,6 +52,47 @@ jobs:
         run: |
           docker compose down -v
 
+  compose-e2e-static:
+    name: End-to-End Tests (Static Config, Compose)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+
+      - name: Setup mise
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+
+      - name: Install grpcurl
+        run: |
+          GRPCURL_VERSION=1.9.1
+          curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" | \
+            sudo tar -xz -C /usr/local/bin grpcurl
+          grpcurl --version
+
+      - name: Start services with Docker Compose (static config)
+        run: docker compose -f compose.static.yml up --build --wait
+
+      - name: Run static-config e2e tests
+        run: ./test/e2e-static.sh
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Docker Compose Status ==="
+          docker compose -f compose.static.yml ps
+          echo ""
+          echo "=== Logs ==="
+          docker compose -f compose.static.yml logs
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f compose.static.yml down -v
+
   gateway-e2e:
     name: End-to-End Tests (Envoy Gateway)
     runs-on: ubuntu-latest
@@ -122,6 +163,83 @@ jobs:
           echo ""
           echo "=== envoy-gateway controller logs ==="
           kubectl -n envoy-gateway-system logs -l control-plane=envoy-gateway --tail=200 || true
+          echo ""
+          echo "=== port-forward log ==="
+          cat /tmp/port-forward.log 2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -f /tmp/port-forward.pid ]; then
+            kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
+          fi
+
+  gateway-e2e-static:
+    name: End-to-End Tests (Static Config, Envoy Gateway)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+
+      - name: Setup mise
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: guardrail-e2e-static
+
+      - name: Bring up stack with Tilt (static overlay)
+        env:
+          GUARDRAIL_ADAPTER_OVERLAY: deploy/local-static
+        run: tilt ci --timeout 15m
+
+      - name: Port-forward Envoy data plane
+        run: |
+          GATEWAY_SVC=$(kubectl -n envoy-gateway-system get svc \
+            -l gateway.envoyproxy.io/owning-gateway-name=eg \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n envoy-gateway-system port-forward \
+            "svc/$GATEWAY_SVC" 10000:80 >/tmp/port-forward.log 2>&1 &
+          echo $! > /tmp/port-forward.pid
+          for i in {1..30}; do
+            if nc -z localhost 10000; then
+              echo "port-forward ready on :10000"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "port-forward did not become ready" >&2
+          cat /tmp/port-forward.log >&2
+          exit 1
+
+      - name: Run gateway static-config e2e tests
+        run: ./test/e2e-gateway-static.sh
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -A
+          echo ""
+          echo "=== Recent events ==="
+          kubectl get events -A --sort-by=.lastTimestamp | tail -50
+          echo ""
+          echo "=== guardrail-adapter logs ==="
+          kubectl -n guardrails logs -l app=guardrail-adapter --tail=200 || true
+          echo ""
+          echo "=== guardrail-adapter configmap ==="
+          kubectl -n guardrails get configmap guardrail-adapter-config -o yaml || true
+          echo ""
+          echo "=== envoy data plane logs ==="
+          kubectl -n envoy-gateway-system logs \
+            -l gateway.envoyproxy.io/owning-gateway-name=eg \
+            --all-containers --tail=200 || true
           echo ""
           echo "=== port-forward log ==="
           cat /tmp/port-forward.log 2>/dev/null || true
