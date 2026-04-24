@@ -115,12 +115,12 @@ type presidioConfigYAML struct {
 func LoadGuardrailConfigFile(path string) (*GuardrailConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config file: %w", err)
+		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
 	var raw guardrailConfigYAML
 	if err := yaml.UnmarshalStrict(data, &raw); err != nil {
-		return nil, fmt.Errorf("decode config yaml: %w", err)
+		return nil, fmt.Errorf("failed to decode config yaml: %w", err)
 	}
 
 	cfg := &GuardrailConfig{
