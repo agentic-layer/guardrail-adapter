@@ -219,7 +219,7 @@ jobs:
           exit 1
 
       - name: Run gateway static-config e2e tests
-        run: ./test/e2e-gateway-static.sh
+        run: ./test/e2e-gateway.sh
 
       - name: Show logs on failure
         if: failure()
