@@ -1,6 +1,9 @@
 package metadata
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -392,6 +395,45 @@ func TestParseModes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLoadGuardrailConfigFile_Presidio(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.yaml")
+	yamlText := `provider: presidio-api
+modes:
+  - pre_call
+  - post_call
+presidio:
+  endpoint: http://presidio:8000
+  language: en
+  score_thresholds:
+    EMAIL_ADDRESS: 0.5
+  entity_actions:
+    EMAIL_ADDRESS: MASK
+`
+	if err := os.WriteFile(path, []byte(yamlText), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, err := LoadGuardrailConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	want := &GuardrailConfig{
+		Provider: "presidio-api",
+		Modes:    []Mode{ModePreCall, ModePostCall},
+		Presidio: &PresidioConfig{
+			Endpoint:        "http://presidio:8000",
+			Language:        "en",
+			ScoreThresholds: map[string]float64{"EMAIL_ADDRESS": 0.5},
+			EntityActions:   map[string]string{"EMAIL_ADDRESS": "MASK"},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mismatch:\n got: %#v\nwant: %#v", got, want)
 	}
 }
 
