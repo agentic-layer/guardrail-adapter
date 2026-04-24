@@ -1,0 +1,9 @@
+# mise configuration for guardrail-adapter development tools
+# Install all tools with: mise install
+# See: https://mise.jdx.dev/
+
+[tools]
+go = "1.24"
+tilt = "0.33.20"
+helm = "3.16.3"
+kubectl = "1.32.0"

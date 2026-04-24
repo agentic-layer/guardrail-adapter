@@ -237,7 +237,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{
 					Response: &extprocv3.CommonResponse{
-						HeaderMutation: contentLengthMutation(len(modifiedBody)),
+						HeaderMutation: contentLengthMutation(),
 						BodyMutation: &extprocv3.BodyMutation{
 							Mutation: &extprocv3.BodyMutation_Body{
 								Body: modifiedBody,
@@ -261,7 +261,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 // header. Required when mutating the HTTP body so Envoy recomputes the length
 // correctly rather than rejecting with
 // "mismatch_between_content_length_and_the_length_of_the_mutated_body".
-func contentLengthMutation(_ int) *extprocv3.HeaderMutation {
+func contentLengthMutation() *extprocv3.HeaderMutation {
 	return &extprocv3.HeaderMutation{
 		RemoveHeaders: []string{"content-length"},
 	}
@@ -369,7 +369,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{
 					Response: &extprocv3.CommonResponse{
-						HeaderMutation: contentLengthMutation(len(modifiedBody)),
+						HeaderMutation: contentLengthMutation(),
 						BodyMutation: &extprocv3.BodyMutation{
 							Mutation: &extprocv3.BodyMutation_Body{
 								Body: modifiedBody,

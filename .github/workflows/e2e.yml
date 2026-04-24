@@ -18,10 +18,10 @@ jobs:
       - name: Clone the code
         uses: actions/checkout@v6
 
-      - name: Setup Go
-        uses: actions/setup-go@v6
+      - name: Setup mise
+        uses: jdx/mise-action@v2
         with:
-          go-version-file: go.mod
+          install: true
 
       - name: Install grpcurl
         run: |
