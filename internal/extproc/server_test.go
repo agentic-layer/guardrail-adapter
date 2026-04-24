@@ -595,7 +595,15 @@ func TestStaticConfigShortCircuitsMetadata(t *testing.T) {
 			FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md},
 		},
 		Request: &extprocv3.ProcessingRequest_RequestHeaders{
-			RequestHeaders: &extprocv3.HttpHeaders{},
+			RequestHeaders: &extprocv3.HttpHeaders{
+				Headers: &corev3.HeaderMap{
+					Headers: []*corev3.HeaderValue{
+						{Key: "x-guardrail-provider", Value: "header-provider"},
+						{Key: "x-guardrail-mode", Value: "post_call"},
+						{Key: "x-guardrail-presidio-endpoint", Value: "http://from-header:8000"},
+					},
+				},
+			},
 		},
 	}
 
@@ -605,7 +613,7 @@ func TestStaticConfigShortCircuitsMetadata(t *testing.T) {
 		t.Fatal("expected state.config to be set from static config, got nil")
 	}
 	if state.config.Provider != "presidio-api" {
-		t.Errorf("provider = %q, want %q (static should win)", state.config.Provider, "presidio-api")
+		t.Errorf("provider = %q, want %q (static should win over both metadata and headers)", state.config.Provider, "presidio-api")
 	}
 	if state.config.Presidio == nil || state.config.Presidio.Endpoint != "http://static:8000" {
 		t.Errorf("endpoint = %#v, want %q", state.config.Presidio, "http://static:8000")

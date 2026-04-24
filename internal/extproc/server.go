@@ -118,7 +118,10 @@ func (s *Server) handleRequest(ctx context.Context, req *extprocv3.ProcessingReq
 	}
 }
 
-// handleRequestHeaders parses guardrail configuration from metadata or request headers.
+// handleRequestHeaders resolves the per-stream guardrail configuration.
+// If the server was constructed with a static config, that value is used
+// unconditionally. Otherwise the config is parsed from MetadataContext,
+// falling back to x-guardrail-* request headers.
 func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *streamState) *extprocv3.ProcessingResponse {
 	if s.staticConfig != nil {
 		state.config = s.staticConfig
