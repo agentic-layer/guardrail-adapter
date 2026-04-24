@@ -9,10 +9,13 @@ on:
 
 jobs:
   e2e:
-    name: End-to-End Tests
+    name: End-to-End Tests (${{ matrix.mode }})
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
+    strategy:
+      matrix:
+        mode: [metadata, static]
 
     steps:
       - name: Clone the code
@@ -31,12 +34,14 @@ jobs:
           grpcurl --version
 
       - name: Start services with Docker Compose
+        env:
+          GUARDRAIL_CONFIG_FILE: ${{ matrix.mode == 'static' && '/etc/guardrail/config.yaml' || '' }}
         run: |
           docker compose up --build --wait
 
       - name: Run e2e tests
         run: |
-          ./test/e2e.sh
+          ./test/e2e.sh ${{ matrix.mode }}
 
       - name: Show logs on failure
         if: failure()
@@ -51,47 +56,6 @@ jobs:
         if: always()
         run: |
           docker compose down -v
-
-  compose-e2e-static:
-    name: End-to-End Tests (Static Config, Compose)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: 'read'
-
-    steps:
-      - name: Clone the code
-        uses: actions/checkout@v6
-
-      - name: Setup mise
-        uses: jdx/mise-action@v2
-        with:
-          install: true
-
-      - name: Install grpcurl
-        run: |
-          GRPCURL_VERSION=1.9.1
-          curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" | \
-            sudo tar -xz -C /usr/local/bin grpcurl
-          grpcurl --version
-
-      - name: Start services with Docker Compose (static config)
-        run: docker compose -f compose.static.yml up --build --wait
-
-      - name: Run static-config e2e tests
-        run: ./test/e2e-static.sh
-
-      - name: Show logs on failure
-        if: failure()
-        run: |
-          echo "=== Docker Compose Status ==="
-          docker compose -f compose.static.yml ps
-          echo ""
-          echo "=== Logs ==="
-          docker compose -f compose.static.yml logs
-
-      - name: Cleanup
-        if: always()
-        run: docker compose -f compose.static.yml down -v
 
   gateway-e2e:
     name: End-to-End Tests (Envoy Gateway)

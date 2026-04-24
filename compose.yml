@@ -8,6 +8,9 @@ services:
       - "9001:9001"
     environment:
       - LOG_LEVEL=info
+      - GUARDRAIL_CONFIG_FILE
+    volumes:
+      - ./test/static-config.yaml:/etc/guardrail/config.yaml:ro
     command: ["--addr", ":9001", "--health-addr", ":8080"]
     depends_on:
       - presidio
