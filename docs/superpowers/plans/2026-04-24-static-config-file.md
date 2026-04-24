@@ -31,31 +31,14 @@
 
 ---
 
-## Task 1: Add `sigs.k8s.io/yaml` dependency
+## Task 1: (Merged into Task 2)
 
-**Files:**
-- Modify: `go.mod`
-- Modify: `go.sum`
+Originally this task added `sigs.k8s.io/yaml` via `go get; go mod tidy`. In
+practice `go mod tidy` removes any module not imported by source code, so
+adding the dep separately from its first use is a no-op. The dependency is
+now added as part of Task 2, where the first import lives.
 
-- [ ] **Step 1: Add the dependency**
-
-Run from repo root:
-```bash
-go get sigs.k8s.io/yaml@latest
-go mod tidy
-```
-
-- [ ] **Step 2: Verify build still works**
-
-Run: `make build`
-Expected: `bin/adapter` produced without errors.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add go.mod go.sum
-git commit -m "chore: add sigs.k8s.io/yaml dependency"
-```
+Skip this task and proceed to Task 2.
 
 ---
 
@@ -179,15 +162,27 @@ func LoadGuardrailConfigFile(path string) (*GuardrailConfig, error) {
 
 Note: no validation yet — Task 3 adds it via failing tests.
 
-- [ ] **Step 4: Run test — confirm it passes**
+- [ ] **Step 4: Add the `sigs.k8s.io/yaml` dependency**
+
+Run: `go mod tidy`
+Expected: `go.mod` gains `sigs.k8s.io/yaml` as a direct dependency (the
+import added in Step 3 triggers the add); `go.sum` is updated.
+
+Sandbox note: `go mod tidy` fetches modules, and on this machine the
+Go toolchain's TLS path through the sandbox may fail with
+`x509: OSStatus -26276`. If that happens, rerun outside the sandbox
+(`dangerouslyDisableSandbox: true`) just for this command. All other
+steps stay in-sandbox.
+
+- [ ] **Step 5: Run test — confirm it passes**
 
 Run: `go test ./internal/metadata/... -run TestLoadGuardrailConfigFile_Presidio -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add internal/metadata/metadata.go internal/metadata/metadata_test.go
+git add go.mod go.sum internal/metadata/metadata.go internal/metadata/metadata_test.go
 git commit -m "feat(metadata): add YAML config file loader"
 ```
 
