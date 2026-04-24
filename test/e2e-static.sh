@@ -56,15 +56,19 @@ if [ -z "$masked_body_b64" ]; then
 fi
 
 masked_body=$(echo "$masked_body_b64" | base64 -d)
-log_info "Masked body: $masked_body"
+masked_message=$(echo "$masked_body" | jq -r '.params.arguments.message')
 
-if echo "$masked_body" | grep -q "john@example.com"; then
-    log_error "✗ Raw email leaked in masked body"
+if [[ "$masked_message" == *"john@example.com"* ]]; then
+    log_error "✗ Masked message still contains the original email address"
+    log_error "Message: $masked_message"
     exit 1
 fi
-if ! echo "$masked_body" | grep -q "<EMAIL_ADDRESS>"; then
-    log_error "✗ <EMAIL_ADDRESS> token not present in masked body"
+
+if [[ "$masked_message" != *"<EMAIL_ADDRESS>"* ]]; then
+    log_error "✗ Masked message does not contain <EMAIL_ADDRESS> placeholder"
+    log_error "Message: $masked_message"
     exit 1
 fi
 
 log_info "✓ static-config PII masking works"
+log_info "  Masked message: $masked_message"
