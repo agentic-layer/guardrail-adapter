@@ -26,6 +26,7 @@ import (
 type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
 	protocolRegistry *protocol.Registry
+	staticConfig     *metadata.GuardrailConfig
 }
 
 // streamState holds per-stream state for processing requests.
@@ -35,15 +36,16 @@ type streamState struct {
 	requestMetadata map[string]interface{}
 }
 
-// NewServer creates a new ext_proc server.
-func NewServer() *Server {
-	// Initialize protocol registry with MCP parser
+// NewServer creates a new ext_proc server. If staticConfig is non-nil, it is
+// used for every request and dynamic metadata/headers are ignored. Pass nil
+// to preserve the dynamic behavior.
+func NewServer(staticConfig *metadata.GuardrailConfig) *Server {
 	registry := protocol.NewRegistry(
 		mcpparser.NewMCPParser(),
 	)
-
 	return &Server{
 		protocolRegistry: registry,
+		staticConfig:     staticConfig,
 	}
 }
 
@@ -118,6 +120,15 @@ func (s *Server) handleRequest(ctx context.Context, req *extprocv3.ProcessingReq
 
 // handleRequestHeaders parses guardrail configuration from metadata or request headers.
 func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *streamState) *extprocv3.ProcessingResponse {
+	if s.staticConfig != nil {
+		state.config = s.staticConfig
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_RequestHeaders{
+				RequestHeaders: &extprocv3.HeadersResponse{},
+			},
+		}
+	}
+
 	// Primary: parse config from metadata_context (populated when Envoy forwards dynamic metadata)
 	if req.MetadataContext != nil {
 		config, err := s.parseMetadata(req.MetadataContext)

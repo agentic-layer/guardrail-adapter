@@ -28,7 +28,7 @@ func main() {
 	grpcServer := grpc.NewServer()
 
 	// Register ext_proc service
-	extprocServer := extproc.NewServer()
+	extprocServer := extproc.NewServer(nil)
 	extprocv3.RegisterExternalProcessorServer(grpcServer, extprocServer)
 
 	// Register health check service
