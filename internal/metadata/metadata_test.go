@@ -525,8 +525,8 @@ func TestLoadGuardrailConfigFile_ValidationErrors(t *testing.T) {
 			wantSub: "modes is required",
 		},
 		{
-			name: "unknown mode",
-			yaml: "provider: presidio-api\nmodes: [mid_call]\npresidio:\n  endpoint: http://p:8000\n",
+			name:    "unknown mode",
+			yaml:    "provider: presidio-api\nmodes: [mid_call]\npresidio:\n  endpoint: http://p:8000\n",
 			wantSub: "unknown mode",
 		},
 		{

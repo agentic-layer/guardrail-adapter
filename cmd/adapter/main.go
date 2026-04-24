@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/agentic-layer/guardrail-adapter/internal/extproc"
+	"github.com/agentic-layer/guardrail-adapter/internal/metadata"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -24,11 +25,26 @@ func main() {
 	healthAddr := flag.String("health-addr", ":8080", "Health check HTTP server address")
 	flag.Parse()
 
+	// Static config path (optional). When set, the adapter ignores dynamic
+	// metadata and x-guardrail-* headers entirely.
+	cfgPath := os.Getenv("GUARDRAIL_CONFIG_FILE")
+	var staticCfg *metadata.GuardrailConfig
+	if cfgPath != "" {
+		loaded, err := metadata.LoadGuardrailConfigFile(cfgPath)
+		if err != nil {
+			log.Fatalf("failed to load static config file %s: %v", cfgPath, err)
+		}
+		staticCfg = loaded
+		log.Printf("static config loaded from %s: provider=%s modes=%v", cfgPath, loaded.Provider, loaded.Modes)
+	} else {
+		log.Printf("static config disabled; using dynamic metadata/headers")
+	}
+
 	// Create gRPC server
 	grpcServer := grpc.NewServer()
 
 	// Register ext_proc service
-	extprocServer := extproc.NewServer(nil)
+	extprocServer := extproc.NewServer(staticCfg)
 	extprocv3.RegisterExternalProcessorServer(grpcServer, extprocServer)
 
 	// Register health check service
