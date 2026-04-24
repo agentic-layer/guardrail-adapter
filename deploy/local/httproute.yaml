@@ -11,6 +11,22 @@ spec:
         - path:
             type: PathPrefix
             value: /mcp
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            add:
+              - name: x-guardrail-provider
+                value: presidio-api
+              - name: x-guardrail-mode
+                value: pre_call
+              - name: x-guardrail-presidio-endpoint
+                value: http://presidio.guardrail-providers:80
+              - name: x-guardrail-presidio-language
+                value: en
+              - name: x-guardrail-presidio-score-thresholds
+                value: '{"ALL":0.5}'
+              - name: x-guardrail-presidio-entity-actions
+                value: '{"EMAIL_ADDRESS":"MASK"}'
       backendRefs:
         - name: echo-mcp
           port: 8000
