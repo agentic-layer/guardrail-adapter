@@ -125,33 +125,22 @@ func (s *Server) handleRequest(ctx context.Context, req *extprocv3.ProcessingReq
 func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *streamState) *extprocv3.ProcessingResponse {
 	if s.staticConfig != nil {
 		state.config = s.staticConfig
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_RequestHeaders{
-				RequestHeaders: &extprocv3.HeadersResponse{},
-			},
-		}
-	}
-
-	// Primary: parse config from metadata_context (populated when Envoy forwards dynamic metadata)
-	if req.MetadataContext != nil {
+	} else if req.MetadataContext != nil {
+		// Primary: parse config from metadata_context (populated when Envoy forwards dynamic metadata)
 		config, err := s.parseMetadata(req.MetadataContext)
 		if err != nil {
 			log.Printf("error parsing guardrail metadata: %v", err)
 		} else {
 			state.config = config
 		}
-	}
-
-	// Fallback: read config from x-guardrail-* request headers injected by the gateway's
-	// Lua HTTP filter via EnvoyPatchPolicy so they are visible to ext_proc.
-	if state.config == nil {
-		if hdrs := req.GetRequestHeaders(); hdrs != nil {
-			config, err := s.parseGuardrailHeaders(hdrs)
-			if err != nil {
-				log.Printf("error parsing guardrail headers: %v", err)
-			} else {
-				state.config = config
-			}
+	} else if hdrs := req.GetRequestHeaders(); hdrs != nil {
+		// Fallback: read config from x-guardrail-* request headers injected by the gateway's
+		// Lua HTTP filter via EnvoyPatchPolicy so they are visible to ext_proc.
+		config, err := s.parseGuardrailHeaders(hdrs)
+		if err != nil {
+			log.Printf("error parsing guardrail headers: %v", err)
+		} else {
+			state.config = config
 		}
 	}
 
