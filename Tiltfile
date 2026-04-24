@@ -19,11 +19,20 @@ docker_build('guardrail-adapter-local', '.', dockerfile='Dockerfile')
 
 k8s_yaml(kustomize('deploy/local'))
 
-# Envoy Gateway dynamically creates a data-plane service with a hash suffix
-# (e.g. envoy-default-eg-<hash>). Use a label-selector-based port-forward
-# so we don't need to hardcode the generated name.
+# Wait for the data-plane service and pods to be ready (cmd), then run the
+# label-selector-based port-forward (serve_cmd) so we don't hardcode the
+# generated name.
 local_resource(
     'envoy-proxy-port-forward',
+    cmd='''
+set -e
+echo "Waiting for envoy data-plane service..."
+until kubectl -n envoy-gateway-system get svc -l gateway.envoyproxy.io/owning-gateway-name=eg -o jsonpath="{.items[0].metadata.name}" 2>/dev/null | grep -q .; do
+  sleep 2
+done
+echo "Waiting for envoy data-plane pods..."
+kubectl -n envoy-gateway-system wait --for=condition=ready pod -l gateway.envoyproxy.io/owning-gateway-name=eg --timeout=300s
+''',
     serve_cmd='kubectl -n envoy-gateway-system port-forward svc/$(kubectl -n envoy-gateway-system get svc -l gateway.envoyproxy.io/owning-gateway-name=eg -o jsonpath="{.items[0].metadata.name}") 10000:80',
     labels=['gateway'],
     resource_deps=['envoy-gateway'],

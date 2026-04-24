@@ -26,6 +26,8 @@ go.work
 go.work.sum
 .env
 compose.yml
+Tiltfile
+Makefile
 
 # IDE
 .idea/
