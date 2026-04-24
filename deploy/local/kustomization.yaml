@@ -8,7 +8,6 @@ resources:
   - guardrail-adapter.yaml
   - guardrail-adapter-static.yaml
   - gateway.yaml
-  - gateway-static.yaml
   - httproute.yaml
   - httproute-static.yaml
   - reference-grant.yaml

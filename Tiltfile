@@ -25,7 +25,6 @@ k8s_yaml(kustomize('deploy/local'))
 gateway_objects = [
     'eg:gatewayclass',
     'eg:gateway:default',
-    'eg-static:gateway:default',
     'echo-mcp:httproute:default',
     'echo-mcp-static:httproute:default',
     'allow-default-to-guardrail-adapter:referencegrant:guardrails',

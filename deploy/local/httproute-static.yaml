@@ -5,14 +5,12 @@ metadata:
   namespace: default
 spec:
   parentRefs:
-    - name: eg-static
-  hostnames:
-    - "echo-mcp.local"
+    - name: eg
   rules:
     - matches:
         - path:
             type: PathPrefix
-            value: /mcp
+            value: /mcp-static
       backendRefs:
         - name: echo-mcp
-          port: 8080
+          port: 8000

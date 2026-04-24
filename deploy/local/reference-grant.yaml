@@ -12,3 +12,6 @@ spec:
     - group: ""
       kind: Service
       name: guardrail-adapter
+    - group: ""
+      kind: Service
+      name: guardrail-adapter-static

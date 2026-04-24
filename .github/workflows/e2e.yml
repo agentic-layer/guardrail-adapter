@@ -101,32 +101,8 @@ jobs:
       - name: Run metadata mode gateway e2e tests
         run: ./test/e2e-gateway.sh
 
-      - name: Port-forward Envoy data plane (static)
-        run: |
-          # Kill previous port-forward
-          if [ -f /tmp/port-forward.pid ]; then
-            kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
-          fi
-
-          GATEWAY_SVC=$(kubectl -n envoy-gateway-system get svc \
-            -l gateway.envoyproxy.io/owning-gateway-name=eg-static \
-            -o jsonpath='{.items[0].metadata.name}')
-          kubectl -n envoy-gateway-system port-forward \
-            "svc/$GATEWAY_SVC" 10000:80 >/tmp/port-forward-static.log 2>&1 &
-          echo $! > /tmp/port-forward-static.pid
-          for i in {1..30}; do
-            if nc -z localhost 10000; then
-              echo "port-forward ready on :10000"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "port-forward did not become ready" >&2
-          cat /tmp/port-forward-static.log >&2
-          exit 1
-
       - name: Run static mode gateway e2e tests
-        run: ./test/e2e-gateway.sh
+        run: MCP_ENDPOINT=http://localhost:10000/mcp-static ./test/e2e-gateway.sh
 
       - name: Show logs on failure
         if: failure()
@@ -154,24 +130,15 @@ jobs:
             -l gateway.envoyproxy.io/owning-gateway-name=eg \
             --all-containers --tail=200 || true
           echo ""
-          echo "=== envoy data plane logs (static) ==="
-          kubectl -n envoy-gateway-system logs \
-            -l gateway.envoyproxy.io/owning-gateway-name=eg-static \
-            --all-containers --tail=200 || true
-          echo ""
           echo "=== envoy-gateway controller logs ==="
           kubectl -n envoy-gateway-system logs -l control-plane=envoy-gateway --tail=200 || true
           echo ""
           echo "=== port-forward log ==="
           cat /tmp/port-forward.log 2>/dev/null || true
-          cat /tmp/port-forward-static.log 2>/dev/null || true
 
       - name: Cleanup
         if: always()
         run: |
           if [ -f /tmp/port-forward.pid ]; then
             kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
-          fi
-          if [ -f /tmp/port-forward-static.pid ]; then
-            kill "$(cat /tmp/port-forward-static.pid)" 2>/dev/null || true
           fi
