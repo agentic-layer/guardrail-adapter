@@ -51,3 +51,84 @@ jobs:
         if: always()
         run: |
           docker compose down -v
+
+  gateway-e2e:
+    name: End-to-End Tests (Envoy Gateway)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v6
+
+      - name: Setup mise
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: guardrail-e2e
+
+      - name: Bring up stack with Tilt
+        run: tilt ci --timeout 15m
+
+      - name: Port-forward Envoy data plane
+        run: |
+          GATEWAY_SVC=$(kubectl -n envoy-gateway-system get svc \
+            -l gateway.envoyproxy.io/owning-gateway-name=eg \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n envoy-gateway-system port-forward \
+            "svc/$GATEWAY_SVC" 10000:80 >/tmp/port-forward.log 2>&1 &
+          echo $! > /tmp/port-forward.pid
+          for i in {1..30}; do
+            if nc -z localhost 10000; then
+              echo "port-forward ready on :10000"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "port-forward did not become ready" >&2
+          cat /tmp/port-forward.log >&2
+          exit 1
+
+      - name: Run gateway e2e tests
+        run: ./test/e2e-gateway.sh
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -A
+          echo ""
+          echo "=== Recent events ==="
+          kubectl get events -A --sort-by=.lastTimestamp | tail -50
+          echo ""
+          echo "=== guardrail-adapter logs ==="
+          kubectl -n guardrails logs -l app=guardrail-adapter --tail=200 || true
+          echo ""
+          echo "=== echo-mcp logs ==="
+          kubectl -n default logs -l app=echo-mcp --tail=200 || true
+          echo ""
+          echo "=== presidio logs ==="
+          kubectl -n guardrail-providers logs -l app=presidio --tail=200 || true
+          echo ""
+          echo "=== envoy data plane logs ==="
+          kubectl -n envoy-gateway-system logs \
+            -l gateway.envoyproxy.io/owning-gateway-name=eg \
+            --all-containers --tail=200 || true
+          echo ""
+          echo "=== envoy-gateway controller logs ==="
+          kubectl -n envoy-gateway-system logs -l control-plane=envoy-gateway --tail=200 || true
+          echo ""
+          echo "=== port-forward log ==="
+          cat /tmp/port-forward.log 2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -f /tmp/port-forward.pid ]; then
+            kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
+          fi
