@@ -13,3 +13,4 @@ resources:
   - reference-grant.yaml
   - ext-proc-policy.yaml
   - ext-proc-policy-static.yaml
+  - patch-policy.yaml

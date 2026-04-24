@@ -30,6 +30,7 @@ gateway_objects = [
     'allow-default-to-guardrail-adapter:referencegrant:guardrails',
     'guardrail-extproc:envoyextensionpolicy:default',
     'guardrail-extproc-static:envoyextensionpolicy:default',
+    'guardrail-route-metadata:envoypatchpolicy:default',
 ]
 
 k8s_resource(
