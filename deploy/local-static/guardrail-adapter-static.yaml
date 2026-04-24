@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guardrail-adapter-config
+  namespace: guardrails
+data:
+  config.yaml: |
+    provider: presidio-api
+    modes:
+      - pre_call
+    presidio:
+      endpoint: http://presidio.guardrail-providers:80
+      language: en
+      score_thresholds:
+        ALL: 0.5
+      entity_actions:
+        EMAIL_ADDRESS: MASK
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guardrail-adapter-static
+  namespace: guardrails
+  labels:
+    app: guardrail-adapter-static
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: guardrail-adapter-static
+  template:
+    metadata:
+      labels:
+        app: guardrail-adapter-static
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: guardrail-adapter
+          image: guardrail-adapter-local:dev
+          imagePullPolicy: Never
+          args:
+            - --addr=:9001
+            - --health-addr=:8080
+          ports:
+            - name: ext-proc
+              containerPort: 9001
+            - name: health
+              containerPort: 8080
+          env:
+            - name: LOG_LEVEL
+              value: info
+            - name: GUARDRAIL_CONFIG_FILE
+              value: /etc/guardrail/config.yaml
+          volumeMounts:
+            - name: guardrail-config
+              mountPath: /etc/guardrail
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: guardrail-config
+          configMap:
+            name: guardrail-adapter-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guardrail-adapter-static
+  namespace: guardrails
+spec:
+  selector:
+    app: guardrail-adapter-static
+  ports:
+    - name: ext-proc
+      port: 9001
+      targetPort: 9001
+      appProtocol: kubernetes.io/h2c

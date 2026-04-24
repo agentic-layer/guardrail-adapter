@@ -3,18 +3,13 @@ kind: Kustomization
 
 resources:
   - ../local
-
-configMapGenerator:
-  - name: guardrail-adapter-config
-    namespace: guardrails
-    files:
-      - config.yaml
+  - guardrail-adapter-static.yaml
 
 patches:
-  - path: adapter-patch.yaml
+  - path: ext-proc-policy-patch.yaml
     target:
-      kind: Deployment
-      name: guardrail-adapter
+      kind: EnvoyExtensionPolicy
+      name: guardrail-extproc
   - path: delete-patch-policy.yaml
     target:
       kind: EnvoyPatchPolicy
