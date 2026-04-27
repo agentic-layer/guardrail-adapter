@@ -25,11 +25,11 @@ k8s_yaml(kustomize('deploy/local'))
 gateway_objects = [
     'eg:gatewayclass',
     'eg:gateway:default',
-    'echo-mcp:httproute:default',
-    'echo-mcp-static:httproute:default',
-    'allow-default-to-guardrail-adapter:referencegrant:guardrails',
-    'guardrail-extproc:envoyextensionpolicy:default',
-    'guardrail-extproc-static:envoyextensionpolicy:default',
+    'echo-mcp:httproute:guardrails-dynamic',
+    'echo-mcp:httproute:guardrails-static',
+    'allow-routes-to-echo-mcp:referencegrant:default',
+    'guardrail-extproc:envoyextensionpolicy:guardrails-dynamic',
+    'guardrail-extproc:envoyextensionpolicy:guardrails-static',
     'guardrail-route-metadata:envoypatchpolicy:default',
 ]
 
@@ -62,5 +62,13 @@ kubectl -n envoy-gateway-system wait --for=condition=ready pod -l gateway.envoyp
 
 k8s_resource('echo-mcp', labels=['mcp'])
 k8s_resource('presidio', labels=['guardrails'])
-k8s_resource('guardrail-adapter', labels=['guardrails'])
-k8s_resource('guardrail-adapter-static', labels=['guardrails'])
+k8s_resource(
+    workload='guardrail-adapter:deployment:guardrails-dynamic',
+    new_name='guardrail-adapter-dynamic',
+    labels=['guardrails'],
+)
+k8s_resource(
+    workload='guardrail-adapter:deployment:guardrails-static',
+    new_name='guardrail-adapter-static',
+    labels=['guardrails'],
+)

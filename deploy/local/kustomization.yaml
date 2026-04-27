@@ -3,14 +3,9 @@ kind: Kustomization
 
 resources:
   - namespaces.yaml
-  - presidio.yaml
-  - echo-mcp.yaml
-  - guardrail-adapter.yaml
-  - guardrail-adapter-static.yaml
   - gateway.yaml
-  - httproute.yaml
-  - httproute-static.yaml
+  - echo-mcp.yaml
+  - presidio.yaml
   - reference-grant.yaml
-  - ext-proc-policy.yaml
-  - ext-proc-policy-static.yaml
-  - patch-policy.yaml
+  - dynamic
+  - static

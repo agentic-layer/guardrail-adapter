@@ -1,0 +1,24 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-mcp
+  namespace: guardrails-static
+spec:
+  parentRefs:
+    - name: eg
+      namespace: default
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp-static
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /mcp
+      backendRefs:
+        - name: echo-mcp
+          namespace: default
+          port: 8000

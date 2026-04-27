@@ -1,17 +1,17 @@
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: ReferenceGrant
 metadata:
-  name: allow-default-to-guardrail-adapter
-  namespace: guardrails
+  name: allow-routes-to-echo-mcp
+  namespace: default
 spec:
   from:
-    - group: gateway.envoyproxy.io
-      kind: EnvoyExtensionPolicy
-      namespace: default
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: guardrails-dynamic
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: guardrails-static
   to:
     - group: ""
       kind: Service
-      name: guardrail-adapter
-    - group: ""
-      kind: Service
-      name: guardrail-adapter-static
+      name: echo-mcp

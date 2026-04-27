@@ -6,7 +6,7 @@ command -v curl >/dev/null 2>&1 || { echo "Error: curl is required but not insta
 command -v jq >/dev/null 2>&1 || { echo "Error: jq is required but not installed"; exit 1; }
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:10000}"
-MCP_ENDPOINT="${GATEWAY_URL}/mcp"
+MCP_ENDPOINT="${MCP_ENDPOINT:-${GATEWAY_URL}/mcp}"
 PII_EMAIL="john@example.com"
 PII_MESSAGE="My email is ${PII_EMAIL}"
 EXPECTED_TOKEN="<EMAIL_ADDRESS>"
