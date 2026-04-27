@@ -2,7 +2,7 @@ apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyExtensionPolicy
 metadata:
   name: guardrail-extproc
-  namespace: default
+  namespace: guardrails-dynamic
 spec:
   targetRefs:
     - group: gateway.networking.k8s.io
@@ -13,7 +13,6 @@ spec:
         - group: ""
           kind: Service
           name: guardrail-adapter
-          namespace: guardrails
           port: 9001
       processingMode:
         request:

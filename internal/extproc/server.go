@@ -26,6 +26,7 @@ import (
 type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
 	protocolRegistry *protocol.Registry
+	staticConfig     *metadata.GuardrailConfig
 }
 
 // streamState holds per-stream state for processing requests.
@@ -35,15 +36,16 @@ type streamState struct {
 	requestMetadata map[string]interface{}
 }
 
-// NewServer creates a new ext_proc server.
-func NewServer() *Server {
-	// Initialize protocol registry with MCP parser
+// NewServer creates a new ext_proc server. If staticConfig is non-nil, it is
+// used for every request and dynamic metadata/headers are ignored. Pass nil
+// to preserve the dynamic behavior.
+func NewServer(staticConfig *metadata.GuardrailConfig) *Server {
 	registry := protocol.NewRegistry(
 		mcpparser.NewMCPParser(),
 	)
-
 	return &Server{
 		protocolRegistry: registry,
+		staticConfig:     staticConfig,
 	}
 }
 
@@ -116,27 +118,35 @@ func (s *Server) handleRequest(ctx context.Context, req *extprocv3.ProcessingReq
 	}
 }
 
-// handleRequestHeaders parses guardrail configuration from metadata or request headers.
+// handleRequestHeaders resolves the per-stream guardrail configuration.
+// If the server was constructed with a static config, that value is used
+// unconditionally. Otherwise the config is parsed from MetadataContext,
+// falling back to x-guardrail-* request headers.
 func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *streamState) *extprocv3.ProcessingResponse {
-	// Primary: parse config from metadata_context (populated when Envoy forwards dynamic metadata)
-	if req.MetadataContext != nil {
-		config, err := s.parseMetadata(req.MetadataContext)
-		if err != nil {
-			log.Printf("error parsing guardrail metadata: %v", err)
-		} else {
-			state.config = config
-		}
-	}
-
-	// Fallback: read config from x-guardrail-* request headers injected by the gateway's
-	// Lua HTTP filter via EnvoyPatchPolicy so they are visible to ext_proc.
-	if state.config == nil {
-		if hdrs := req.GetRequestHeaders(); hdrs != nil {
-			config, err := s.parseGuardrailHeaders(hdrs)
+	if s.staticConfig != nil {
+		state.config = s.staticConfig
+	} else {
+		// Primary: parse config from metadata_context (populated when Envoy forwards dynamic metadata)
+		if req.MetadataContext != nil {
+			config, err := s.parseMetadata(req.MetadataContext)
 			if err != nil {
-				log.Printf("error parsing guardrail headers: %v", err)
+				log.Printf("error parsing guardrail metadata: %v", err)
 			} else {
 				state.config = config
+			}
+		}
+		// Fallback: when metadata didn't yield a config, read from x-guardrail-* request
+		// headers injected by the gateway's Lua HTTP filter via EnvoyPatchPolicy.
+		// Envoy sends a non-nil but empty MetadataContext whenever the policy declares
+		// accessibleNamespaces, so checking state.config is the only reliable signal.
+		if state.config == nil {
+			if hdrs := req.GetRequestHeaders(); hdrs != nil {
+				config, err := s.parseGuardrailHeaders(hdrs)
+				if err != nil {
+					log.Printf("error parsing guardrail headers: %v", err)
+				} else {
+					state.config = config
+				}
 			}
 		}
 	}

@@ -5,7 +5,16 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
-ADAPTER_GRPC_ADDR="localhost:9001"
+# Accept mode as first argument: "metadata" (default) or "static"
+MODE="${1:-metadata}"
+
+# Set the adapter address based on mode
+if [ "$MODE" = "static" ]; then
+    ADAPTER_GRPC_ADDR="localhost:9002"
+else
+    ADAPTER_GRPC_ADDR="localhost:9001"
+fi
+
 PRESIDIO_ENDPOINT="http://presidio:8000"
 
 log_info() {
@@ -26,7 +35,7 @@ if ! command -v jq &> /dev/null; then
     exit 1
 fi
 
-log_info "Test: ext_proc Server Connectivity"
+log_info "Test: ext_proc Server Connectivity ($MODE mode)"
 services=$(grpcurl -plaintext "${ADAPTER_GRPC_ADDR}" list 2>&1)
 if ! echo "$services" | grep -q "envoy.service.ext_proc.v3.ExternalProcessor"; then
     log_error "✗ ext_proc service not found in service list"
@@ -35,16 +44,26 @@ if ! echo "$services" | grep -q "envoy.service.ext_proc.v3.ExternalProcessor"; t
 fi
 log_info "✓ ext_proc service is registered"
 
-log_info "Test: Presidio PII masking via ext_proc"
+log_info "Test: Presidio PII masking via ext_proc ($MODE mode)"
 
 mcp_payload='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send","arguments":{"message":"My email is john@example.com"}}}'
 mcp_payload_b64=$(printf '%s' "$mcp_payload" | base64 | tr -d '\n')
 
-stream=$(cat <<EOF
+if [ "$MODE" = "static" ]; then
+    # Static config mode: no metadata_context, adapter reads from YAML file
+    stream=$(cat <<EOF
+{"request_headers":{}}
+{"request_body":{"body":"${mcp_payload_b64}","end_of_stream":true}}
+EOF
+)
+else
+    # Metadata mode: send metadata_context with guardrail config
+    stream=$(cat <<EOF
 {"request_headers":{},"metadata_context":{"filter_metadata":{"envoy.filters.http.ext_proc":{"guardrail.provider":"presidio-api","guardrail.mode":"pre_call","guardrail.presidio.endpoint":"${PRESIDIO_ENDPOINT}","guardrail.presidio.language":"en","guardrail.presidio.score_thresholds":"{\"ALL\":0.5}","guardrail.presidio.entity_actions":"{\"EMAIL_ADDRESS\":\"MASK\"}"}}}}
 {"request_body":{"body":"${mcp_payload_b64}","end_of_stream":true}}
 EOF
 )
+fi
 
 if ! response=$(printf '%s' "$stream" | grpcurl -plaintext -d @ "${ADAPTER_GRPC_ADDR}" envoy.service.ext_proc.v3.ExternalProcessor/Process 2>&1); then
     log_error "✗ grpcurl failed"
