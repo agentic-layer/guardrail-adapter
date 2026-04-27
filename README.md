@@ -158,6 +158,41 @@ make run
 - `--addr`: Address for the gRPC ext_proc server (default: `:9001`)
 - `--health-addr`: Address for the HTTP health check server (default: `:8080`)
 
+### Static Configuration (ConfigMap-friendly)
+
+The adapter can alternatively be configured via a YAML file loaded once at
+startup, bypassing the dynamic metadata / `EnvoyPatchPolicy` workaround.
+This is the recommended path for Kubernetes deployments where one pod
+serves a single guardrail+provider combination.
+
+Set `GUARDRAIL_CONFIG_FILE` to the path of a YAML file with the following
+schema:
+
+```yaml
+provider: presidio-api       # required
+modes:                       # required, non-empty list: pre_call | post_call
+  - pre_call
+  - post_call
+presidio:                    # required when provider: presidio-api
+  endpoint: http://presidio-analyzer:3000
+  language: en               # optional
+  score_thresholds:          # optional
+    EMAIL_ADDRESS: 0.5
+  entity_actions:            # optional
+    EMAIL_ADDRESS: MASK
+```
+
+When `GUARDRAIL_CONFIG_FILE` is set:
+- the file is loaded and validated at startup; any error exits non-zero,
+- dynamic metadata (`MetadataContext`) and `x-guardrail-*` headers are
+  ignored,
+- reloading requires restarting the pod (e.g. via a ConfigMap checksum
+  annotation on the Pod template).
+
+When `GUARDRAIL_CONFIG_FILE` is unset or empty, the adapter falls back to
+the dynamic metadata path (with `x-guardrail-*` header fallback) described
+above.
+
 ## Docker Usage
 
 ### Build Docker Image

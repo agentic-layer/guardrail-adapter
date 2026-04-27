@@ -1,7 +1,12 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: guardrails
+  name: guardrails-dynamic
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: guardrails-static
 ---
 apiVersion: v1
 kind: Namespace

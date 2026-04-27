@@ -3,7 +3,10 @@ package metadata
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
+
+	"sigs.k8s.io/yaml"
 )
 
 // Mode represents when guardrail inspection should occur.
@@ -89,6 +92,78 @@ func parseModes(modeStr string) []Mode {
 		}
 	}
 	return modes
+}
+
+// guardrailConfigYAML is the on-disk representation, decoded via sigs.k8s.io/yaml
+// (which converts YAML -> JSON internally, so tags must be `json`).
+type guardrailConfigYAML struct {
+	Provider string              `json:"provider"`
+	Modes    []string            `json:"modes"`
+	Presidio *presidioConfigYAML `json:"presidio,omitempty"`
+}
+
+type presidioConfigYAML struct {
+	Endpoint        string             `json:"endpoint"`
+	Language        string             `json:"language,omitempty"`
+	ScoreThresholds map[string]float64 `json:"score_thresholds,omitempty"`
+	EntityActions   map[string]string  `json:"entity_actions,omitempty"`
+}
+
+// LoadGuardrailConfigFile reads and decodes a YAML config file, then validates it.
+// Returns a *GuardrailConfig ready for the ext_proc server. Unknown fields cause
+// an error so typos surface immediately.
+func LoadGuardrailConfigFile(path string) (*GuardrailConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var raw guardrailConfigYAML
+	if err := yaml.UnmarshalStrict(data, &raw); err != nil {
+		return nil, fmt.Errorf("failed to decode config yaml: %w", err)
+	}
+
+	cfg := &GuardrailConfig{
+		Provider: raw.Provider,
+		Modes:    make([]Mode, 0, len(raw.Modes)),
+	}
+	for _, m := range raw.Modes {
+		cfg.Modes = append(cfg.Modes, Mode(m))
+	}
+	if raw.Presidio != nil {
+		cfg.Presidio = &PresidioConfig{
+			Endpoint:        raw.Presidio.Endpoint,
+			Language:        raw.Presidio.Language,
+			ScoreThresholds: raw.Presidio.ScoreThresholds,
+			EntityActions:   raw.Presidio.EntityActions,
+		}
+	}
+	if err := validateGuardrailConfig(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func validateGuardrailConfig(cfg *GuardrailConfig) error {
+	if cfg.Provider == "" {
+		return fmt.Errorf("provider is required")
+	}
+	if len(cfg.Modes) == 0 {
+		return fmt.Errorf("modes is required and must be non-empty")
+	}
+	for _, m := range cfg.Modes {
+		switch m {
+		case ModePreCall, ModePostCall:
+		default:
+			return fmt.Errorf("unknown mode %q (allowed: pre_call, post_call)", m)
+		}
+	}
+	if cfg.Provider == "presidio-api" {
+		if cfg.Presidio == nil || cfg.Presidio.Endpoint == "" {
+			return fmt.Errorf("presidio.endpoint is required when provider is presidio-api")
+		}
+	}
+	return nil
 }
 
 // parsePresidioConfig extracts Presidio-specific configuration from metadata fields.

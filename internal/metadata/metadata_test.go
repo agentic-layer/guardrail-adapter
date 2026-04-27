@@ -1,6 +1,10 @@
 package metadata
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -395,6 +399,45 @@ func TestParseModes(t *testing.T) {
 	}
 }
 
+func TestLoadGuardrailConfigFile_Presidio(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.yaml")
+	yamlText := `provider: presidio-api
+modes:
+  - pre_call
+  - post_call
+presidio:
+  endpoint: http://presidio:8000
+  language: en
+  score_thresholds:
+    EMAIL_ADDRESS: 0.5
+  entity_actions:
+    EMAIL_ADDRESS: MASK
+`
+	if err := os.WriteFile(path, []byte(yamlText), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, err := LoadGuardrailConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	want := &GuardrailConfig{
+		Provider: "presidio-api",
+		Modes:    []Mode{ModePreCall, ModePostCall},
+		Presidio: &PresidioConfig{
+			Endpoint:        "http://presidio:8000",
+			Language:        "en",
+			ScoreThresholds: map[string]float64{"EMAIL_ADDRESS": 0.5},
+			EntityActions:   map[string]string{"EMAIL_ADDRESS": "MASK"},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 // TestPresidioConfigFields tests that Presidio config correctly extracts all fields.
 func TestPresidioConfigFields(t *testing.T) {
 	fields := map[string]string{
@@ -462,5 +505,75 @@ func TestPresidioConfigFields(t *testing.T) {
 		} else if action != expectedAction {
 			t.Errorf("EntityActions[%s] = %q, want %q", entity, action, expectedAction)
 		}
+	}
+}
+
+func TestLoadGuardrailConfigFile_ValidationErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantSub string
+	}{
+		{
+			name:    "missing provider",
+			yaml:    "modes: [pre_call]\n",
+			wantSub: "provider is required",
+		},
+		{
+			name:    "empty modes",
+			yaml:    "provider: presidio-api\nmodes: []\npresidio:\n  endpoint: http://p:8000\n",
+			wantSub: "modes is required",
+		},
+		{
+			name:    "unknown mode",
+			yaml:    "provider: presidio-api\nmodes: [mid_call]\npresidio:\n  endpoint: http://p:8000\n",
+			wantSub: "unknown mode",
+		},
+		{
+			name:    "presidio missing endpoint",
+			yaml:    "provider: presidio-api\nmodes: [pre_call]\npresidio: {}\n",
+			wantSub: "presidio.endpoint is required",
+		},
+		{
+			name:    "presidio-api without presidio block",
+			yaml:    "provider: presidio-api\nmodes: [pre_call]\n",
+			wantSub: "presidio.endpoint is required",
+		},
+		{
+			name:    "unknown top-level key",
+			yaml:    "provider: presidio-api\nmodes: [pre_call]\nbogus: true\npresidio:\n  endpoint: http://p:8000\n",
+			wantSub: "decode config yaml",
+		},
+		{
+			name:    "modes wrong type",
+			yaml:    "provider: presidio-api\nmodes: pre_call\npresidio:\n  endpoint: http://p:8000\n",
+			wantSub: "decode config yaml",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			_, err := LoadGuardrailConfigFile(path)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestLoadGuardrailConfigFile_FileMissing(t *testing.T) {
+	_, err := LoadGuardrailConfigFile(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	if err == nil {
+		t.Fatal("expected error for missing file, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to read config file") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
