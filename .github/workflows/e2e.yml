@@ -110,7 +110,7 @@ jobs:
           kubectl -n guardrails-dynamic logs -l app=guardrail-adapter --tail=200 || true
           echo ""
           echo "=== guardrail-adapter-static logs ==="
-          kubectl -n guardrails-static logs -l app=guardrail-adapter-static --tail=200 || true
+          kubectl -n guardrails-static logs -l app=guardrail-adapter --tail=200 || true
           echo ""
           echo "=== echo-mcp logs ==="
           kubectl -n default logs -l app=echo-mcp --tail=200 || true
