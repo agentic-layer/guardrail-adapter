@@ -125,22 +125,29 @@ func (s *Server) handleRequest(ctx context.Context, req *extprocv3.ProcessingReq
 func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *streamState) *extprocv3.ProcessingResponse {
 	if s.staticConfig != nil {
 		state.config = s.staticConfig
-	} else if req.MetadataContext != nil {
+	} else {
 		// Primary: parse config from metadata_context (populated when Envoy forwards dynamic metadata)
-		config, err := s.parseMetadata(req.MetadataContext)
-		if err != nil {
-			log.Printf("error parsing guardrail metadata: %v", err)
-		} else {
-			state.config = config
+		if req.MetadataContext != nil {
+			config, err := s.parseMetadata(req.MetadataContext)
+			if err != nil {
+				log.Printf("error parsing guardrail metadata: %v", err)
+			} else {
+				state.config = config
+			}
 		}
-	} else if hdrs := req.GetRequestHeaders(); hdrs != nil {
-		// Fallback: read config from x-guardrail-* request headers injected by the gateway's
-		// Lua HTTP filter via EnvoyPatchPolicy so they are visible to ext_proc.
-		config, err := s.parseGuardrailHeaders(hdrs)
-		if err != nil {
-			log.Printf("error parsing guardrail headers: %v", err)
-		} else {
-			state.config = config
+		// Fallback: when metadata didn't yield a config, read from x-guardrail-* request
+		// headers injected by the gateway's Lua HTTP filter via EnvoyPatchPolicy.
+		// Envoy sends a non-nil but empty MetadataContext whenever the policy declares
+		// accessibleNamespaces, so checking state.config is the only reliable signal.
+		if state.config == nil {
+			if hdrs := req.GetRequestHeaders(); hdrs != nil {
+				config, err := s.parseGuardrailHeaders(hdrs)
+				if err != nil {
+					log.Printf("error parsing guardrail headers: %v", err)
+				} else {
+					state.config = config
+				}
+			}
 		}
 	}
 
