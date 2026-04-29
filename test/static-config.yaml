@@ -5,6 +5,6 @@ presidio:
   endpoint: http://presidio:8000
   language: en
   score_thresholds:
-    ALL: 0.5
+    ALL: "0.5"
   entity_actions:
     EMAIL_ADDRESS: MASK

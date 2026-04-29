@@ -34,8 +34,8 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 			name: "PERSON entity below threshold - allow",
 			config: Config{
 				Language: "en",
-				ScoreThresholds: map[string]float64{
-					"PERSON": 0.8,
+				ScoreThresholds: map[string]string{
+					"PERSON": "0.8",
 				},
 			},
 			text: "John Doe",
@@ -49,8 +49,8 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 			name: "PERSON entity above threshold - mask",
 			config: Config{
 				Language: "en",
-				ScoreThresholds: map[string]float64{
-					"PERSON": 0.5,
+				ScoreThresholds: map[string]string{
+					"PERSON": "0.5",
 				},
 				EntityActions: map[string]string{
 					"PERSON": "MASK",
@@ -118,8 +118,8 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 			name: "ALL threshold applies to unspecified entity",
 			config: Config{
 				Language: "en",
-				ScoreThresholds: map[string]float64{
-					"ALL": 0.8,
+				ScoreThresholds: map[string]string{
+					"ALL": "0.8",
 				},
 				EntityActions: map[string]string{
 					"PHONE_NUMBER": "MASK",
@@ -136,9 +136,9 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 			name: "Per-entity threshold overrides ALL",
 			config: Config{
 				Language: "en",
-				ScoreThresholds: map[string]float64{
-					"ALL":    0.5,
-					"PERSON": 0.9,
+				ScoreThresholds: map[string]string{
+					"ALL":    "0.5",
+					"PERSON": "0.9",
 				},
 				EntityActions: map[string]string{
 					"PERSON": "MASK",
@@ -336,13 +336,13 @@ func TestPresidioProvider_ProcessRequest(t *testing.T) {
 func TestPresidioProvider_filterByThreshold(t *testing.T) {
 	tests := []struct {
 		name             string
-		thresholds       map[string]float64
+		thresholds       map[string]string
 		results          []recognizerResult
 		expectedFiltered int
 	}{
 		{
 			name:       "no thresholds - all pass",
-			thresholds: map[string]float64{},
+			thresholds: map[string]string{},
 			results: []recognizerResult{
 				{EntityType: "PERSON", Score: 0.5},
 				{EntityType: "EMAIL", Score: 0.3},
@@ -351,8 +351,8 @@ func TestPresidioProvider_filterByThreshold(t *testing.T) {
 		},
 		{
 			name: "ALL threshold filters low scores",
-			thresholds: map[string]float64{
-				"ALL": 0.7,
+			thresholds: map[string]string{
+				"ALL": "0.7",
 			},
 			results: []recognizerResult{
 				{EntityType: "PERSON", Score: 0.8},
@@ -362,9 +362,9 @@ func TestPresidioProvider_filterByThreshold(t *testing.T) {
 		},
 		{
 			name: "per-entity threshold overrides ALL",
-			thresholds: map[string]float64{
-				"ALL":    0.5,
-				"PERSON": 0.9,
+			thresholds: map[string]string{
+				"ALL":    "0.5",
+				"PERSON": "0.9",
 			},
 			results: []recognizerResult{
 				{EntityType: "PERSON", Score: 0.8},

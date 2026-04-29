@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/agentic-layer/guardrail-adapter/internal/provider"
@@ -19,9 +20,12 @@ type Config struct {
 	// Language is the language of the text to analyze (e.g., "en").
 	Language string
 	// ScoreThresholds maps entity types to minimum confidence scores.
+	// Values are stored as strings to preserve the literal user-provided
+	// representation and avoid floating-point precision drift through the
+	// config pipeline; they are parsed to float64 only at comparison time.
 	// Entities below the threshold are filtered out.
 	// Use "ALL" as a catch-all default for entity types not explicitly configured.
-	ScoreThresholds map[string]float64
+	ScoreThresholds map[string]string
 	// EntityActions maps entity types to actions (ALLOW, MASK, or BLOCK).
 	// Use "ALL" as a catch-all default for entity types not explicitly configured.
 	EntityActions map[string]string
@@ -195,8 +199,8 @@ func (p *Provider) filterByThreshold(results []recognizerResult) []recognizerRes
 
 	filtered := make([]recognizerResult, 0)
 	for _, result := range results {
-		threshold := p.getThreshold(result.EntityType)
-		if result.Score >= threshold {
+		threshold, ok := p.getThreshold(result.EntityType)
+		if !ok || result.Score >= threshold {
 			filtered = append(filtered, result)
 		}
 	}
@@ -205,14 +209,21 @@ func (p *Provider) filterByThreshold(results []recognizerResult) []recognizerRes
 
 // getThreshold returns the threshold for the given entity type.
 // Falls back to "ALL" if the specific entity type is not configured.
-func (p *Provider) getThreshold(entityType string) float64 {
-	if threshold, ok := p.config.ScoreThresholds[entityType]; ok {
-		return threshold
+// Returns ok=false when no threshold is configured or the configured value
+// cannot be parsed as a float.
+func (p *Provider) getThreshold(entityType string) (float64, bool) {
+	raw, ok := p.config.ScoreThresholds[entityType]
+	if !ok {
+		raw, ok = p.config.ScoreThresholds["ALL"]
 	}
-	if threshold, ok := p.config.ScoreThresholds["ALL"]; ok {
-		return threshold
+	if !ok {
+		return 0, false
 	}
-	return 0.0 // No threshold configured
+	threshold, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, false
+	}
+	return threshold, true
 }
 
 // determineAction determines the action to take based on the detected entities.

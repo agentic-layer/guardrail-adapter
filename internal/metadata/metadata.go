@@ -21,12 +21,10 @@ const (
 
 const (
 	// Common metadata key prefixes
-	keyPrefix   = "guardrail."
 	keyProvider = "guardrail.provider"
 	keyMode     = "guardrail.mode"
 
 	// Presidio-specific key prefixes
-	presidioPrefix          = "guardrail.presidio."
 	presidioEndpoint        = "guardrail.presidio.endpoint"
 	presidioLanguage        = "guardrail.presidio.language"
 	presidioScoreThresholds = "guardrail.presidio.score_thresholds"
@@ -42,9 +40,12 @@ type GuardrailConfig struct {
 
 // PresidioConfig contains Presidio-specific configuration.
 type PresidioConfig struct {
-	Endpoint        string
-	Language        string
-	ScoreThresholds map[string]float64
+	Endpoint string
+	Language string
+	// ScoreThresholds values are kept as strings to preserve the literal
+	// user-provided representation (e.g. "0.85") and avoid floating-point
+	// precision drift through the metadata/config pipeline.
+	ScoreThresholds map[string]string
 	EntityActions   map[string]string
 }
 
@@ -103,10 +104,10 @@ type guardrailConfigYAML struct {
 }
 
 type presidioConfigYAML struct {
-	Endpoint        string             `json:"endpoint"`
-	Language        string             `json:"language,omitempty"`
-	ScoreThresholds map[string]float64 `json:"score_thresholds,omitempty"`
-	EntityActions   map[string]string  `json:"entity_actions,omitempty"`
+	Endpoint        string            `json:"endpoint"`
+	Language        string            `json:"language,omitempty"`
+	ScoreThresholds map[string]string `json:"score_thresholds,omitempty"`
+	EntityActions   map[string]string `json:"entity_actions,omitempty"`
 }
 
 // LoadGuardrailConfigFile reads and decodes a YAML config file, then validates it.
@@ -173,9 +174,11 @@ func parsePresidioConfig(fields map[string]string) (*PresidioConfig, error) {
 		Language: fields[presidioLanguage],
 	}
 
-	// Parse score thresholds (JSON object)
+	// Parse score thresholds (JSON object). Values must be strings so
+	// the original numeric representation survives the metadata pipeline
+	// without floating-point conversion.
 	if thresholdsStr := fields[presidioScoreThresholds]; thresholdsStr != "" {
-		var thresholds map[string]float64
+		var thresholds map[string]string
 		if err := json.Unmarshal([]byte(thresholdsStr), &thresholds); err != nil {
 			return nil, fmt.Errorf("failed to parse score_thresholds JSON: %w", err)
 		}

@@ -25,7 +25,7 @@ func TestParseGuardrailConfig(t *testing.T) {
 				"guardrail.mode":                      "pre_call,post_call",
 				"guardrail.presidio.endpoint":         "http://presidio.default.svc:80",
 				"guardrail.presidio.language":         "en",
-				"guardrail.presidio.score_thresholds": `{"ALL": 0.5}`,
+				"guardrail.presidio.score_thresholds": `{"ALL": "0.5"}`,
 				"guardrail.presidio.entity_actions":   `{"PERSON": "MASK", "CREDIT_CARD": "BLOCK"}`,
 			},
 			wantProvider: "presidio-api",
@@ -167,7 +167,7 @@ func TestParsePresidioConfig(t *testing.T) {
 		fields              map[string]string
 		wantEndpoint        string
 		wantLanguage        string
-		wantScoreThresholds map[string]float64
+		wantScoreThresholds map[string]string
 		wantEntityActions   map[string]string
 		wantError           bool
 	}{
@@ -176,14 +176,14 @@ func TestParsePresidioConfig(t *testing.T) {
 			fields: map[string]string{
 				"guardrail.presidio.endpoint":         "http://presidio.default.svc:80",
 				"guardrail.presidio.language":         "en",
-				"guardrail.presidio.score_thresholds": `{"ALL": 0.5, "PERSON": 0.7}`,
+				"guardrail.presidio.score_thresholds": `{"ALL": "0.5", "PERSON": "0.7"}`,
 				"guardrail.presidio.entity_actions":   `{"PERSON": "MASK", "CREDIT_CARD": "BLOCK"}`,
 			},
 			wantEndpoint: "http://presidio.default.svc:80",
 			wantLanguage: "en",
-			wantScoreThresholds: map[string]float64{
-				"ALL":    0.5,
-				"PERSON": 0.7,
+			wantScoreThresholds: map[string]string{
+				"ALL":    "0.5",
+				"PERSON": "0.7",
 			},
 			wantEntityActions: map[string]string{
 				"PERSON":      "MASK",
@@ -213,10 +213,10 @@ func TestParsePresidioConfig(t *testing.T) {
 		{
 			name: "only_score_thresholds",
 			fields: map[string]string{
-				"guardrail.presidio.score_thresholds": `{"ALL": 0.8}`,
+				"guardrail.presidio.score_thresholds": `{"ALL": "0.8"}`,
 			},
-			wantScoreThresholds: map[string]float64{
-				"ALL": 0.8,
+			wantScoreThresholds: map[string]string{
+				"ALL": "0.8",
 			},
 		},
 		{
@@ -245,7 +245,7 @@ func TestParsePresidioConfig(t *testing.T) {
 		{
 			name: "score_thresholds_wrong_type",
 			fields: map[string]string{
-				"guardrail.presidio.score_thresholds": `{"ALL": "not_a_number"}`,
+				"guardrail.presidio.score_thresholds": `{"ALL": 0.5}`,
 			},
 			wantError: true,
 		},
@@ -290,13 +290,13 @@ func TestParsePresidioConfig(t *testing.T) {
 						if gotValue, ok := config.ScoreThresholds[key]; !ok {
 							t.Errorf("missing ScoreThresholds[%s]", key)
 						} else if gotValue != wantValue {
-							t.Errorf("ScoreThresholds[%s] = %f, want %f", key, gotValue, wantValue)
+							t.Errorf("ScoreThresholds[%s] = %q, want %q", key, gotValue, wantValue)
 						}
 					}
 					// Check no extra keys
 					for key := range config.ScoreThresholds {
 						if _, ok := tc.wantScoreThresholds[key]; !ok {
-							t.Errorf("unexpected ScoreThresholds[%s] = %f", key, config.ScoreThresholds[key])
+							t.Errorf("unexpected ScoreThresholds[%s] = %q", key, config.ScoreThresholds[key])
 						}
 					}
 				}
@@ -410,7 +410,7 @@ presidio:
   endpoint: http://presidio:8000
   language: en
   score_thresholds:
-    EMAIL_ADDRESS: 0.5
+    EMAIL_ADDRESS: "0.5"
   entity_actions:
     EMAIL_ADDRESS: MASK
 `
@@ -429,7 +429,7 @@ presidio:
 		Presidio: &PresidioConfig{
 			Endpoint:        "http://presidio:8000",
 			Language:        "en",
-			ScoreThresholds: map[string]float64{"EMAIL_ADDRESS": 0.5},
+			ScoreThresholds: map[string]string{"EMAIL_ADDRESS": "0.5"},
 			EntityActions:   map[string]string{"EMAIL_ADDRESS": "MASK"},
 		},
 	}
@@ -445,7 +445,7 @@ func TestPresidioConfigFields(t *testing.T) {
 		"guardrail.mode":                      "pre_call,post_call",
 		"guardrail.presidio.endpoint":         "http://presidio.default.svc:80",
 		"guardrail.presidio.language":         "en",
-		"guardrail.presidio.score_thresholds": `{"ALL": 0.5, "PERSON": 0.7, "EMAIL": 0.9}`,
+		"guardrail.presidio.score_thresholds": `{"ALL": "0.5", "PERSON": "0.7", "EMAIL": "0.9"}`,
 		"guardrail.presidio.entity_actions":   `{"PERSON": "MASK", "CREDIT_CARD": "BLOCK", "EMAIL": "MASK"}`,
 	}
 
@@ -471,10 +471,10 @@ func TestPresidioConfigFields(t *testing.T) {
 		t.Errorf("Language = %q, want %q", config.Presidio.Language, "en")
 	}
 
-	expectedThresholds := map[string]float64{
-		"ALL":    0.5,
-		"PERSON": 0.7,
-		"EMAIL":  0.9,
+	expectedThresholds := map[string]string{
+		"ALL":    "0.5",
+		"PERSON": "0.7",
+		"EMAIL":  "0.9",
 	}
 
 	if len(config.Presidio.ScoreThresholds) != len(expectedThresholds) {
@@ -485,7 +485,7 @@ func TestPresidioConfigFields(t *testing.T) {
 		if score, ok := config.Presidio.ScoreThresholds[entity]; !ok {
 			t.Errorf("missing score threshold for %s", entity)
 		} else if score != expectedScore {
-			t.Errorf("ScoreThresholds[%s] = %f, want %f", entity, score, expectedScore)
+			t.Errorf("ScoreThresholds[%s] = %q, want %q", entity, score, expectedScore)
 		}
 	}
 
