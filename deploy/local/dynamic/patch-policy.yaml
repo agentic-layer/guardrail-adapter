@@ -30,6 +30,6 @@ spec:
                 h:headers():replace('x-guardrail-mode', 'pre_call')
                 h:headers():replace('x-guardrail-presidio-endpoint', 'http://presidio.guardrail-providers:80')
                 h:headers():replace('x-guardrail-presidio-language', 'en')
-                h:headers():replace('x-guardrail-presidio-score-thresholds', '{"ALL":0.5}')
+                h:headers():replace('x-guardrail-presidio-score-thresholds', '{"ALL":"0.5"}')
                 h:headers():replace('x-guardrail-presidio-entity-actions', '{"EMAIL_ADDRESS":"MASK"}')
               end

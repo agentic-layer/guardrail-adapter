@@ -59,7 +59,7 @@ EOF
 else
     # Metadata mode: send metadata_context with guardrail config
     stream=$(cat <<EOF
-{"request_headers":{},"metadata_context":{"filter_metadata":{"envoy.filters.http.ext_proc":{"guardrail.provider":"presidio-api","guardrail.mode":"pre_call","guardrail.presidio.endpoint":"${PRESIDIO_ENDPOINT}","guardrail.presidio.language":"en","guardrail.presidio.score_thresholds":"{\"ALL\":0.5}","guardrail.presidio.entity_actions":"{\"EMAIL_ADDRESS\":\"MASK\"}"}}}}
+{"request_headers":{},"metadata_context":{"filter_metadata":{"envoy.filters.http.ext_proc":{"guardrail.provider":"presidio-api","guardrail.mode":"pre_call","guardrail.presidio.endpoint":"${PRESIDIO_ENDPOINT}","guardrail.presidio.language":"en","guardrail.presidio.score_thresholds":"{\"ALL\":\"0.5\"}","guardrail.presidio.entity_actions":"{\"EMAIL_ADDRESS\":\"MASK\"}"}}}}
 {"request_body":{"body":"${mcp_payload_b64}","end_of_stream":true}}
 EOF
 )

@@ -12,7 +12,7 @@ data:
       endpoint: http://presidio.guardrail-providers:80
       language: en
       score_thresholds:
-        ALL: 0.5
+        ALL: "0.5"
       entity_actions:
         EMAIL_ADDRESS: MASK
 ---
