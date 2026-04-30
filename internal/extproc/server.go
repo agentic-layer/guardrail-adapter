@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strconv"
 	"strings"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -31,10 +32,11 @@ type Server struct {
 
 // streamState holds per-stream state for processing requests.
 type streamState struct {
-	config          *metadata.GuardrailConfig
-	parser          protocol.Parser
-	parserAttempted bool
-	requestMetadata map[string]interface{}
+	config           *metadata.GuardrailConfig
+	parser           protocol.Parser
+	parserAttempted  bool
+	skipResponseBody bool
+	requestMetadata  map[string]interface{}
 }
 
 // NewServer creates a new ext_proc server. If staticConfig is non-nil, it is
@@ -94,11 +96,7 @@ func (s *Server) handleRequest(ctx context.Context, req *extprocv3.ProcessingReq
 	case *extprocv3.ProcessingRequest_RequestBody:
 		return s.handleRequestBody(ctx, v.RequestBody, state)
 	case *extprocv3.ProcessingRequest_ResponseHeaders:
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_ResponseHeaders{
-				ResponseHeaders: &extprocv3.HeadersResponse{},
-			},
-		}
+		return s.handleResponseHeaders(v.ResponseHeaders, state)
 	case *extprocv3.ProcessingRequest_ResponseBody:
 		return s.handleResponseBody(ctx, v.ResponseBody, state)
 	case *extprocv3.ProcessingRequest_RequestTrailers:
@@ -157,6 +155,43 @@ func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *s
 			RequestHeaders: &extprocv3.HeadersResponse{},
 		},
 	}
+}
+
+// handleResponseHeaders inspects the upstream response status. Non-2xx
+// responses (typically plain-text or HTML error pages) cannot be parsed as
+// JSON-RPC, so we mark the stream to skip body inspection and avoid noisy
+// parse errors on the response body.
+func (s *Server) handleResponseHeaders(hdrs *extprocv3.HttpHeaders, state *streamState) *extprocv3.ProcessingResponse {
+	if status, ok := readStatus(hdrs); ok && (status < 200 || status >= 300) {
+		state.skipResponseBody = true
+	}
+	return &extprocv3.ProcessingResponse{
+		Response: &extprocv3.ProcessingResponse_ResponseHeaders{
+			ResponseHeaders: &extprocv3.HeadersResponse{},
+		},
+	}
+}
+
+// readStatus extracts the HTTP :status pseudo-header as an int.
+func readStatus(hdrs *extprocv3.HttpHeaders) (int, bool) {
+	if hdrs.GetHeaders() == nil {
+		return 0, false
+	}
+	for _, h := range hdrs.GetHeaders().GetHeaders() {
+		if h.Key != ":status" {
+			continue
+		}
+		val := h.Value
+		if len(h.RawValue) > 0 {
+			val = string(h.RawValue)
+		}
+		code, err := strconv.Atoi(val)
+		if err != nil {
+			return 0, false
+		}
+		return code, true
+	}
+	return 0, false
 }
 
 // handleRequestBody processes the request body with guardrail inspection.
@@ -256,6 +291,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 				},
 			}
 		}
+		log.Printf("masked request body: %d replacements, %d -> %d bytes", len(replacements), len(body.Body), len(modifiedBody))
 
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
@@ -302,6 +338,16 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 		}
 	}
 
+	// Non-2xx upstream responses are typically plain-text or HTML error pages
+	// rather than JSON-RPC. Skip parsing entirely.
+	if state.skipResponseBody {
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_ResponseBody{
+				ResponseBody: &extprocv3.BodyResponse{},
+			},
+		}
+	}
+
 	// If no config is set or post_call mode is not enabled, passthrough
 	if state.config == nil || !s.modeEnabled(state.config, metadata.ModePostCall) {
 		return &extprocv3.ProcessingResponse{
@@ -324,7 +370,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 	// Parse response and extract texts
 	texts, shouldInspect, err := state.parser.ParseResponse(ctx, body.Body)
 	if err != nil {
-		log.Printf("error parsing response: %v", err)
+		log.Printf("error parsing response: %v (body=%q)", err, body.Body)
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
