@@ -4,7 +4,7 @@
 
 [tools]
 go = "1.26.2"
-tilt = "0.33.20"
+tilt = "0.37.3"
 helm = "3.20.2"
 kubectl = "1.36.0"
 grpcurl = "1.9.3"
