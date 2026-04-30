@@ -172,8 +172,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 	// Select appropriate protocol parser
 	parser := s.protocolRegistry.SelectParser(ctx, body.Body, nil)
 	if parser == nil {
-		// No parser available, passthrough
-		log.Printf("no protocol parser available for request body")
+		// No parser available, passthrough (registry has already logged the reason).
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{},
@@ -291,8 +290,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 	// Select appropriate protocol parser
 	parser := s.protocolRegistry.SelectParser(ctx, body.Body, nil)
 	if parser == nil {
-		// No parser available, passthrough
-		log.Printf("no protocol parser available for response body")
+		// No parser available, passthrough (registry has already logged the reason).
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},

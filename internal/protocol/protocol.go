@@ -10,8 +10,11 @@ type TextExtraction struct {
 
 // Parser is the interface for parsing different protocol messages.
 type Parser interface {
-	// CanParse checks if this parser can handle the given body based on content or metadata.
-	CanParse(ctx context.Context, body []byte, metadata map[string]string) bool
+	// CanParse reports whether this parser can handle the given body.
+	// When the parser cannot handle the body, the returned error explains why
+	// (used for diagnostics when no parser matches). When the parser matches,
+	// the error is nil.
+	CanParse(ctx context.Context, body []byte, metadata map[string]string) (bool, error)
 
 	// ParseRequest parses a request message and extracts text fields.
 	// Returns the extracted texts and whether the request should be inspected.
