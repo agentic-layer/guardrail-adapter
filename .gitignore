@@ -40,3 +40,6 @@ go.work.sum
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Local git worktrees
+worktrees/
