@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -29,6 +29,7 @@ type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
 	protocolRegistry *protocol.Registry
 	staticConfig     *metadata.GuardrailConfig
+	logger           *slog.Logger
 }
 
 // streamState holds per-stream state for processing requests.
@@ -42,14 +43,18 @@ type streamState struct {
 
 // NewServer creates a new ext_proc server. If staticConfig is non-nil, it is
 // used for every request and dynamic metadata/headers are ignored. Pass nil
-// to preserve the dynamic behavior.
-func NewServer(staticConfig *metadata.GuardrailConfig) *Server {
+// to preserve the dynamic behavior. If logger is nil, slog.Default() is used.
+func NewServer(logger *slog.Logger, staticConfig *metadata.GuardrailConfig) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	registry := protocol.NewRegistry(
 		mcpparser.NewMCPParser(),
 	)
 	return &Server{
 		protocolRegistry: registry,
 		staticConfig:     staticConfig,
+		logger:           logger,
 	}
 }
 
@@ -74,7 +79,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			return nil
 		}
 		if err != nil {
-			log.Printf("error receiving request: %v", err)
+			s.logger.Error("error receiving request", "error", err)
 			return status.Errorf(codes.Unknown, "failed to receive request: %v", err)
 		}
 
@@ -83,7 +88,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 
 		// Send the response back to Envoy
 		if err := stream.Send(resp); err != nil {
-			log.Printf("error sending response: %v", err)
+			s.logger.Error("error sending response", "error", err)
 			return status.Errorf(codes.Unknown, "failed to send response: %v", err)
 		}
 	}
@@ -113,7 +118,7 @@ func (s *Server) handleRequest(ctx context.Context, req *extprocv3.ProcessingReq
 			},
 		}
 	default:
-		log.Printf("unknown request type: %T", v)
+		s.logger.Warn("unknown request type", "type", fmt.Sprintf("%T", v))
 		return &extprocv3.ProcessingResponse{}
 	}
 }
@@ -130,7 +135,7 @@ func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *s
 		if req.MetadataContext != nil {
 			config, err := s.parseMetadata(req.MetadataContext)
 			if err != nil {
-				log.Printf("error parsing guardrail metadata: %v", err)
+				s.logger.Warn("failed to parse guardrail metadata", "error", err)
 			} else {
 				state.config = config
 			}
@@ -143,7 +148,7 @@ func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *s
 			if hdrs := req.GetRequestHeaders(); hdrs != nil {
 				config, err := s.parseGuardrailHeaders(hdrs)
 				if err != nil {
-					log.Printf("error parsing guardrail headers: %v", err)
+					s.logger.Warn("failed to parse guardrail headers", "error", err)
 				} else {
 					state.config = config
 				}
@@ -215,10 +220,13 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 		if err != nil {
 			var nm *protocol.NoParserMatchError
 			if errors.As(err, &nm) {
-				log.Printf("protocol: no parser matched body (size=%d, prefix=%q, reasons=[%s])",
-					nm.BodySize, nm.Prefix, strings.Join(nm.Reasons, "; "))
+				s.logger.Warn("no protocol parser matched request body",
+					slog.Int("body_size", nm.BodySize),
+					slog.String("prefix", nm.Prefix),
+					slog.Any("reasons", nm.Reasons),
+				)
 			} else {
-				log.Printf("protocol: parser selection failed: %v", err)
+				s.logger.Warn("protocol parser selection failed", "error", err)
 			}
 		}
 	}
@@ -244,7 +252,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 	// Parse request and extract texts
 	texts, shouldInspect, err := state.parser.ParseRequest(ctx, body.Body)
 	if err != nil {
-		log.Printf("error parsing request: %v", err)
+		s.logger.Warn("failed to parse request body", "error", err)
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{},
@@ -264,7 +272,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 	// Create provider instance
 	prov, err := s.createProvider(state.config)
 	if err != nil {
-		log.Printf("error creating provider: %v", err)
+		s.logger.Warn("failed to create provider", "error", err)
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{},
@@ -295,14 +303,18 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 	if len(replacements) > 0 {
 		modifiedBody, err := state.parser.ReplaceTexts(ctx, body.Body, replacements)
 		if err != nil {
-			log.Printf("error replacing texts: %v", err)
+			s.logger.Warn("failed to replace texts in request body", "error", err)
 			return &extprocv3.ProcessingResponse{
 				Response: &extprocv3.ProcessingResponse_RequestBody{
 					RequestBody: &extprocv3.BodyResponse{},
 				},
 			}
 		}
-		log.Printf("masked request body: %d replacements, %d -> %d bytes", len(replacements), len(body.Body), len(modifiedBody))
+		s.logger.Info("masked request body",
+			slog.Int("replacements", len(replacements)),
+			slog.Int("before_size", len(body.Body)),
+			slog.Int("after_size", len(modifiedBody)),
+		)
 
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
@@ -381,7 +393,10 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 	// Parse response and extract texts
 	texts, shouldInspect, err := state.parser.ParseResponse(ctx, body.Body)
 	if err != nil {
-		log.Printf("error parsing response: %v (body=%q)", err, body.Body)
+		s.logger.Warn("failed to parse response body",
+			slog.Any("error", err),
+			slog.String("body_prefix", protocol.Preview(body.Body, 64)),
+		)
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
@@ -401,7 +416,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 	// Create provider instance
 	prov, err := s.createProvider(state.config)
 	if err != nil {
-		log.Printf("error creating provider: %v", err)
+		s.logger.Warn("failed to create provider", "error", err)
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
@@ -431,7 +446,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 		}
 
 		if err != nil {
-			log.Printf("error processing response text: %v", err)
+			s.logger.Warn("failed to process response text", "error", err, "path", text.Path)
 			continue
 		}
 
@@ -445,7 +460,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 	if len(replacements) > 0 {
 		modifiedBody, err := state.parser.ReplaceTexts(ctx, body.Body, replacements)
 		if err != nil {
-			log.Printf("error replacing texts: %v", err)
+			s.logger.Warn("failed to replace texts in response body", "error", err)
 			return &extprocv3.ProcessingResponse{
 				Response: &extprocv3.ProcessingResponse_ResponseBody{
 					ResponseBody: &extprocv3.BodyResponse{},
@@ -585,7 +600,7 @@ func (s *Server) createBlockResponse(reason string) *extprocv3.ProcessingRespons
 
 	bodyBytes, err := json.Marshal(errorBody)
 	if err != nil {
-		log.Printf("error marshaling error body: %v", err)
+		s.logger.Error("failed to marshal block-response body", "error", err)
 		bodyBytes = []byte(`{"error":{"code":"GUARDRAIL_VIOLATION","message":"Request blocked by guardrail"}}`)
 	}
 

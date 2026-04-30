@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/agentic-layer/guardrail-adapter/internal/extproc"
+	"github.com/agentic-layer/guardrail-adapter/internal/logging"
 	"github.com/agentic-layer/guardrail-adapter/internal/metadata"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc"
@@ -25,6 +26,15 @@ func main() {
 	healthAddr := flag.String("health-addr", ":8080", "Health check HTTP server address")
 	flag.Parse()
 
+	// Build the application logger from LOG_LEVEL / LOG_FORMAT env vars.
+	// Invalid values warn and fall back to defaults so deploys are not broken
+	// by a typo.
+	logger, logErr := logging.New()
+	if logErr != nil {
+		fmt.Fprintln(os.Stderr, logErr)
+	}
+	slog.SetDefault(logger)
+
 	// Static config path (optional). When set, the adapter ignores dynamic
 	// metadata and x-guardrail-* headers entirely.
 	cfgPath := os.Getenv("GUARDRAIL_CONFIG_FILE")
@@ -32,19 +42,24 @@ func main() {
 	if cfgPath != "" {
 		loaded, err := metadata.LoadGuardrailConfigFile(cfgPath)
 		if err != nil {
-			log.Fatalf("failed to load static config file %s: %v", cfgPath, err)
+			slog.Error("failed to load static config", "path", cfgPath, "error", err)
+			os.Exit(1)
 		}
 		staticCfg = loaded
-		log.Printf("static config loaded from %s: provider=%s modes=%v", cfgPath, loaded.Provider, loaded.Modes)
+		slog.Info("static config loaded",
+			"path", cfgPath,
+			"provider", loaded.Provider,
+			"modes", loaded.Modes,
+		)
 	} else {
-		log.Printf("static config disabled; using dynamic metadata/headers")
+		slog.Info("static config disabled, using dynamic metadata/headers")
 	}
 
 	// Create gRPC server
 	grpcServer := grpc.NewServer()
 
 	// Register ext_proc service
-	extprocServer := extproc.NewServer(staticCfg)
+	extprocServer := extproc.NewServer(logger, staticCfg)
 	extprocv3.RegisterExternalProcessorServer(grpcServer, extprocServer)
 
 	// Register health check service
@@ -58,7 +73,8 @@ func main() {
 	// Start gRPC server
 	listener, err := net.Listen("tcp", *addr)
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		slog.Error("failed to listen", "addr", *addr, "error", err)
+		os.Exit(1)
 	}
 
 	// Start HTTP health check server
@@ -73,9 +89,10 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Health check server listening on %s", *healthAddr)
+		slog.Info("health check server listening", "addr", *healthAddr)
 		if err := healthHTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("health check server failed: %v", err)
+			slog.Error("health check server failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -85,14 +102,15 @@ func main() {
 
 	go func() {
 		<-sigChan
-		log.Println("shutting down gracefully...")
+		slog.Info("shutting down gracefully")
 		grpcServer.GracefulStop()
 		_ = healthHTTPServer.Close()
 	}()
 
 	// Start serving
-	log.Printf("ext_proc server listening on %s", *addr)
+	slog.Info("ext_proc server listening", "addr", *addr)
 	if err := grpcServer.Serve(listener); err != nil {
-		log.Fatalf("failed to serve: %v", err)
+		slog.Error("failed to serve", "error", err)
+		os.Exit(1)
 	}
 }
