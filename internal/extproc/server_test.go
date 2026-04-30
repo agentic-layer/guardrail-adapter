@@ -836,6 +836,210 @@ func TestHeaderFallbackConfig(t *testing.T) {
 	}
 }
 
+// TestEmptyRequestBodySkipsParserSelection verifies that an empty request body
+// is passed through without invoking the protocol registry, and that the
+// subsequent response is also passed through because no parser was identified
+// for the stream.
+func TestEmptyRequestBodySkipsParserSelection(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	server := NewServer(nil)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "pre_call,post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{
+		FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md},
+	}
+
+	requests := []*extprocv3.ProcessingRequest{
+		{
+			Request:         &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}},
+			MetadataContext: metadataCtx,
+		},
+		{
+			Request:         &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: nil}},
+			MetadataContext: metadataCtx,
+		},
+		{
+			Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{
+				Body: []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"john@example.com"}]}}`),
+			}},
+			MetadataContext: metadataCtx,
+		},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	if len(stream.sent) != 3 {
+		t.Fatalf("sent %d responses, want 3", len(stream.sent))
+	}
+
+	reqBody, ok := stream.sent[1].Response.(*extprocv3.ProcessingResponse_RequestBody)
+	if !ok {
+		t.Fatalf("expected RequestBody response, got %T", stream.sent[1].Response)
+	}
+	if reqBody.RequestBody.Response != nil && reqBody.RequestBody.Response.BodyMutation != nil {
+		t.Error("empty request body should be passthrough, but got BodyMutation")
+	}
+
+	respBody, ok := stream.sent[2].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	if !ok {
+		t.Fatalf("expected ResponseBody response, got %T", stream.sent[2].Response)
+	}
+	if respBody.ResponseBody.Response != nil && respBody.ResponseBody.Response.BodyMutation != nil {
+		t.Error("response body should be passthrough when no parser was selected, but got BodyMutation")
+	}
+}
+
+// TestEmptyResponseBodyPassesThrough verifies that an empty response body is
+// passed through without invoking the parser even when a parser was identified
+// from the request.
+func TestEmptyResponseBodyPassesThrough(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	server := NewServer(nil)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{
+		FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md},
+	}
+
+	requests := []*extprocv3.ProcessingRequest{
+		{
+			Request:         &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}},
+			MetadataContext: metadataCtx,
+		},
+		{
+			Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{
+				Body: []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`),
+			}},
+			MetadataContext: metadataCtx,
+		},
+		{
+			Request:         &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: nil}},
+			MetadataContext: metadataCtx,
+		},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	if len(stream.sent) != 3 {
+		t.Fatalf("sent %d responses, want 3", len(stream.sent))
+	}
+	respBody, ok := stream.sent[2].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	if !ok {
+		t.Fatalf("expected ResponseBody response, got %T", stream.sent[2].Response)
+	}
+	if respBody.ResponseBody.Response != nil && respBody.ResponseBody.Response.BodyMutation != nil {
+		t.Error("empty response body should be passthrough, but got BodyMutation")
+	}
+}
+
+// TestPostCallOnlyParserSharedFromRequest verifies that even when pre_call mode
+// is disabled, the parser is selected during request body handling and reused
+// to inspect the response body.
+func TestPostCallOnlyParserSharedFromRequest(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	server := NewServer(nil)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{
+		FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md},
+	}
+
+	requestBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`)
+	responseBody := []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"contact john@example.com"}]}}`)
+
+	requests := []*extprocv3.ProcessingRequest{
+		{
+			Request:         &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}},
+			MetadataContext: metadataCtx,
+		},
+		{
+			Request:         &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: requestBody}},
+			MetadataContext: metadataCtx,
+		},
+		{
+			Request:         &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: responseBody}},
+			MetadataContext: metadataCtx,
+		},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	if len(stream.sent) != 3 {
+		t.Fatalf("sent %d responses, want 3", len(stream.sent))
+	}
+
+	// Request body should be passthrough (pre_call disabled).
+	reqBody, ok := stream.sent[1].Response.(*extprocv3.ProcessingResponse_RequestBody)
+	if !ok {
+		t.Fatalf("expected RequestBody response, got %T", stream.sent[1].Response)
+	}
+	if reqBody.RequestBody.Response != nil && reqBody.RequestBody.Response.BodyMutation != nil {
+		t.Error("request body should be passthrough when only post_call is enabled, but got BodyMutation")
+	}
+
+	// Response body should be MASKED — proves the parser was identified from
+	// the request and reused to extract texts from the response.
+	respBody, ok := stream.sent[2].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	if !ok {
+		t.Fatalf("expected ResponseBody response, got %T", stream.sent[2].Response)
+	}
+	if respBody.ResponseBody.Response == nil || respBody.ResponseBody.Response.BodyMutation == nil {
+		t.Fatal("expected BodyMutation on response (mask), got passthrough")
+	}
+	mutated := respBody.ResponseBody.Response.BodyMutation.GetBody()
+	if len(mutated) == 0 {
+		t.Error("expected non-empty mutated response body")
+	}
+	if string(mutated) == string(responseBody) {
+		t.Error("expected mutated response body to differ from original")
+	}
+}
+
 // TestHeaderFallbackInRequestFlow tests that header-fallback config is used when
 // MetadataContext is nil and that body mutations include the content-length removal.
 func TestHeaderFallbackInRequestFlow(t *testing.T) {

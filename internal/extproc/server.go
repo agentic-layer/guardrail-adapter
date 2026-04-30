@@ -31,8 +31,9 @@ type Server struct {
 
 // streamState holds per-stream state for processing requests.
 type streamState struct {
-	config *metadata.GuardrailConfig
-	// requestMetadata stores metadata from request processing (for use in response processing)
+	config          *metadata.GuardrailConfig
+	parser          protocol.Parser
+	parserAttempted bool
 	requestMetadata map[string]interface{}
 }
 
@@ -160,7 +161,23 @@ func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *s
 
 // handleRequestBody processes the request body with guardrail inspection.
 func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody, state *streamState) *extprocv3.ProcessingResponse {
-	// If no config is set or pre_call mode is not enabled, passthrough
+	// Empty bodies (e.g. trailing chunks, GETs) carry no protocol signal.
+	if len(body.Body) == 0 {
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_RequestBody{
+				RequestBody: &extprocv3.BodyResponse{},
+			},
+		}
+	}
+
+	// Identify the protocol from the first non-empty request body. The result
+	// (which may be nil) is shared with the response handler via streamState.
+	if !state.parserAttempted {
+		state.parser = s.protocolRegistry.SelectParser(ctx, body.Body, nil)
+		state.parserAttempted = true
+	}
+
+	// If pre_call inspection isn't requested, pass through without inspecting.
 	if state.config == nil || !s.modeEnabled(state.config, metadata.ModePreCall) {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
@@ -169,10 +186,8 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 		}
 	}
 
-	// Select appropriate protocol parser
-	parser := s.protocolRegistry.SelectParser(ctx, body.Body, nil)
-	if parser == nil {
-		// No parser available, passthrough (registry has already logged the reason).
+	// No parser available, passthrough (registry has already logged the reason).
+	if state.parser == nil {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{},
@@ -181,7 +196,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 	}
 
 	// Parse request and extract texts
-	texts, shouldInspect, err := parser.ParseRequest(ctx, body.Body)
+	texts, shouldInspect, err := state.parser.ParseRequest(ctx, body.Body)
 	if err != nil {
 		log.Printf("error parsing request: %v", err)
 		return &extprocv3.ProcessingResponse{
@@ -232,7 +247,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 
 	// If there are replacements, apply MASK action
 	if len(replacements) > 0 {
-		modifiedBody, err := parser.ReplaceTexts(ctx, body.Body, replacements)
+		modifiedBody, err := state.parser.ReplaceTexts(ctx, body.Body, replacements)
 		if err != nil {
 			log.Printf("error replacing texts: %v", err)
 			return &extprocv3.ProcessingResponse{
@@ -278,6 +293,15 @@ func contentLengthMutation() *extprocv3.HeaderMutation {
 
 // handleResponseBody processes the response body with guardrail inspection.
 func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBody, state *streamState) *extprocv3.ProcessingResponse {
+	// Empty bodies (end-of-stream chunks, no-content responses) carry no payload to inspect.
+	if len(body.Body) == 0 {
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_ResponseBody{
+				ResponseBody: &extprocv3.BodyResponse{},
+			},
+		}
+	}
+
 	// If no config is set or post_call mode is not enabled, passthrough
 	if state.config == nil || !s.modeEnabled(state.config, metadata.ModePostCall) {
 		return &extprocv3.ProcessingResponse{
@@ -287,10 +311,9 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 		}
 	}
 
-	// Select appropriate protocol parser
-	parser := s.protocolRegistry.SelectParser(ctx, body.Body, nil)
-	if parser == nil {
-		// No parser available, passthrough (registry has already logged the reason).
+	// Reuse the parser identified from the request body. If the request body
+	// was empty or no parser matched, the protocol is unknown and we passthrough.
+	if state.parser == nil {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
@@ -299,7 +322,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 	}
 
 	// Parse response and extract texts
-	texts, shouldInspect, err := parser.ParseResponse(ctx, body.Body)
+	texts, shouldInspect, err := state.parser.ParseResponse(ctx, body.Body)
 	if err != nil {
 		log.Printf("error parsing response: %v", err)
 		return &extprocv3.ProcessingResponse{
@@ -363,7 +386,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 
 	// If there are replacements, apply MASK action
 	if len(replacements) > 0 {
-		modifiedBody, err := parser.ReplaceTexts(ctx, body.Body, replacements)
+		modifiedBody, err := state.parser.ReplaceTexts(ctx, body.Body, replacements)
 		if err != nil {
 			log.Printf("error replacing texts: %v", err)
 			return &extprocv3.ProcessingResponse{
