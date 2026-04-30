@@ -30,7 +30,7 @@ services:
 
   # Presidio Analyzer service
   presidio:
-    image: ghcr.io/agentic-layer/presidio:0.3.0
+    image: ghcr.io/agentic-layer/presidio:0.3.1
     ports:
       - "8000:8000"
     healthcheck:
