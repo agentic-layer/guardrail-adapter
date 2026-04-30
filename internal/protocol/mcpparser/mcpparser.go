@@ -2,6 +2,7 @@ package mcpparser
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/agentic-layer/guardrail-adapter/internal/mcp"
 	"github.com/agentic-layer/guardrail-adapter/internal/protocol"
@@ -16,15 +17,24 @@ func NewMCPParser() *MCPParser {
 }
 
 // CanParse checks if this parser can handle the given body.
-// MCP uses JSON-RPC 2.0 format, so we check for the "jsonrpc" field.
-func (p *MCPParser) CanParse(ctx context.Context, body []byte, metadata map[string]string) bool {
-	// Try to parse as MCP request/response
-	_, err := mcp.ParseRequest(body)
-	if err == nil {
-		return true
+// MCP uses JSON-RPC 2.0; we attempt request and response parses, and
+// return a concatenated error when both fail so callers can log why.
+func (p *MCPParser) CanParse(ctx context.Context, body []byte, metadata map[string]string) (bool, error) {
+	req, reqErr := mcp.ParseRequest(body)
+	if reqErr == nil && req.JSONRPC == "2.0" {
+		return true, nil
 	}
-	_, err = mcp.ParseResponse(body)
-	return err == nil
+	resp, respErr := mcp.ParseResponse(body)
+	if respErr == nil && resp.JSONRPC == "2.0" {
+		return true, nil
+	}
+	if reqErr == nil {
+		reqErr = fmt.Errorf("missing or invalid jsonrpc field")
+	}
+	if respErr == nil {
+		respErr = fmt.Errorf("missing or invalid jsonrpc field")
+	}
+	return false, fmt.Errorf("not an MCP message (request parse: %v; response parse: %v)", reqErr, respErr)
 }
 
 // ParseRequest parses an MCP request message and extracts text fields.
