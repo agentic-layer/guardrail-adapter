@@ -1,10 +1,8 @@
 package protocol
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log"
 	"strings"
 	"testing"
 )
@@ -25,9 +23,9 @@ func TestPreview(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := preview(tc.body, tc.n)
+			got := Preview(tc.body, tc.n)
 			if got != tc.want {
-				t.Errorf("preview() = %q, want %q", got, tc.want)
+				t.Errorf("Preview() = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -64,41 +62,45 @@ func TestSelectParser_Match(t *testing.T) {
 	a := &fakeParser{name: "a", matches: false, reason: "nope-a"}
 	b := &fakeParser{name: "b", matches: true}
 
-	var logBuf bytes.Buffer
-	prevOutput := log.Writer()
-	log.SetOutput(&logBuf)
-	t.Cleanup(func() { log.SetOutput(prevOutput) })
-
 	reg := NewRegistry(a, b)
-	got := reg.SelectParser(context.Background(), []byte("hello"), nil)
+	got, err := reg.SelectParser(context.Background(), []byte("hello"), nil)
 
+	if err != nil {
+		t.Fatalf("SelectParser() error = %v, want nil", err)
+	}
 	if got != b {
 		t.Fatalf("SelectParser() = %v, want b", got)
 	}
-	if logBuf.Len() != 0 {
-		t.Errorf("expected no log output on match, got: %s", logBuf.String())
-	}
 }
 
-func TestSelectParser_NoMatch_LogsReasons(t *testing.T) {
+func TestSelectParser_NoMatch_ReturnsError(t *testing.T) {
 	a := &fakeParser{name: "a", matches: false, reason: "nope-a"}
 	b := &fakeParser{name: "b", matches: false, reason: "nope-b"}
 
-	var logBuf bytes.Buffer
-	prevOutput := log.Writer()
-	log.SetOutput(&logBuf)
-	t.Cleanup(func() { log.SetOutput(prevOutput) })
-
 	reg := NewRegistry(a, b)
-	got := reg.SelectParser(context.Background(), []byte("hello\x00world"), nil)
+	got, err := reg.SelectParser(context.Background(), []byte("hello\x00world"), nil)
 
 	if got != nil {
-		t.Fatalf("SelectParser() = %v, want nil", got)
+		t.Fatalf("SelectParser() parser = %v, want nil", got)
 	}
-	out := logBuf.String()
-	for _, want := range []string{"no parser matched", "size=11", `prefix="hello.world"`, "nope-a", "nope-b"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("log output missing %q; got: %s", want, out)
+	var nm *NoParserMatchError
+	if !errors.As(err, &nm) {
+		t.Fatalf("SelectParser() err = %v, want *NoParserMatchError", err)
+	}
+	if nm.BodySize != 11 {
+		t.Errorf("BodySize = %d, want 11", nm.BodySize)
+	}
+	if nm.Prefix != "hello.world" {
+		t.Errorf("Prefix = %q, want %q", nm.Prefix, "hello.world")
+	}
+	joined := strings.Join(nm.Reasons, "|")
+	for _, want := range []string{"nope-a", "nope-b"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("Reasons missing %q; got %v", want, nm.Reasons)
 		}
+	}
+	// Error string still includes the diagnostic for callers that just log err.
+	if !strings.Contains(err.Error(), "no parser matched") {
+		t.Errorf("Error() = %q, missing summary", err.Error())
 	}
 }
