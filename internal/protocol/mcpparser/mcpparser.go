@@ -17,24 +17,19 @@ func NewMCPParser() *MCPParser {
 }
 
 // CanParse checks if this parser can handle the given body.
-// MCP uses JSON-RPC 2.0; we attempt request and response parses, and
-// return a concatenated error when both fail so callers can log why.
+// MCP uses JSON-RPC 2.0; the body must parse as a JSON-RPC request and
+// declare jsonrpc=="2.0". Response-shape bodies are rejected here — the
+// ext_proc layer reuses the parser selected from the request for the
+// matching response.
 func (p *MCPParser) CanParse(ctx context.Context, body []byte, metadata map[string]string) (bool, error) {
-	req, reqErr := mcp.ParseRequest(body)
-	if reqErr == nil && req.JSONRPC == "2.0" {
-		return true, nil
+	req, err := mcp.ParseRequest(body)
+	if err != nil {
+		return false, fmt.Errorf("not an MCP request: %w", err)
 	}
-	resp, respErr := mcp.ParseResponse(body)
-	if respErr == nil && resp.JSONRPC == "2.0" {
-		return true, nil
+	if req.JSONRPC != "2.0" {
+		return false, fmt.Errorf("missing or invalid jsonrpc field")
 	}
-	if reqErr == nil {
-		reqErr = fmt.Errorf("missing or invalid jsonrpc field")
-	}
-	if respErr == nil {
-		respErr = fmt.Errorf("missing or invalid jsonrpc field")
-	}
-	return false, fmt.Errorf("not an MCP message (request parse: %v; response parse: %v)", reqErr, respErr)
+	return true, nil
 }
 
 // ParseRequest parses an MCP request message and extracts text fields.
