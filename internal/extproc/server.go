@@ -98,12 +98,22 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 func (s *Server) handleRequest(ctx context.Context, req *extprocv3.ProcessingRequest, state *streamState) *extprocv3.ProcessingResponse {
 	switch v := req.Request.(type) {
 	case *extprocv3.ProcessingRequest_RequestHeaders:
+		s.logger.Debug("received request headers")
 		return s.handleRequestHeaders(req, state)
 	case *extprocv3.ProcessingRequest_RequestBody:
+		s.logger.Debug("received request body",
+			slog.Int("body_size", len(v.RequestBody.GetBody())),
+			slog.Bool("end_of_stream", v.RequestBody.GetEndOfStream()),
+		)
 		return s.handleRequestBody(ctx, v.RequestBody, state)
 	case *extprocv3.ProcessingRequest_ResponseHeaders:
+		s.logger.Debug("received response headers")
 		return s.handleResponseHeaders(v.ResponseHeaders, state)
 	case *extprocv3.ProcessingRequest_ResponseBody:
+		s.logger.Debug("received response body",
+			slog.Int("body_size", len(v.ResponseBody.GetBody())),
+			slog.Bool("end_of_stream", v.ResponseBody.GetEndOfStream()),
+		)
 		return s.handleResponseBody(ctx, v.ResponseBody, state)
 	case *extprocv3.ProcessingRequest_RequestTrailers:
 		return &extprocv3.ProcessingResponse{
@@ -128,16 +138,19 @@ func (s *Server) handleRequest(ctx context.Context, req *extprocv3.ProcessingReq
 // unconditionally. Otherwise the config is parsed from MetadataContext,
 // falling back to x-guardrail-* request headers.
 func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *streamState) *extprocv3.ProcessingResponse {
+	source := ""
 	if s.staticConfig != nil {
 		state.config = s.staticConfig
+		source = "static"
 	} else {
 		// Primary: parse config from metadata_context (populated when Envoy forwards dynamic metadata)
 		if req.MetadataContext != nil {
 			config, err := s.parseMetadata(req.MetadataContext)
 			if err != nil {
 				s.logger.Warn("failed to parse guardrail metadata", "error", err)
-			} else {
+			} else if config != nil {
 				state.config = config
+				source = "metadata"
 			}
 		}
 		// Fallback: when metadata didn't yield a config, read from x-guardrail-* request
@@ -149,11 +162,22 @@ func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *s
 				config, err := s.parseGuardrailHeaders(hdrs)
 				if err != nil {
 					s.logger.Warn("failed to parse guardrail headers", "error", err)
-				} else {
+				} else if config != nil {
 					state.config = config
+					source = "headers"
 				}
 			}
 		}
+	}
+
+	if state.config != nil {
+		s.logger.Debug("guardrail config resolved",
+			slog.String("source", source),
+			slog.String("provider", state.config.Provider),
+			slog.Any("modes", state.config.Modes),
+		)
+	} else {
+		s.logger.Debug("no guardrail config resolved, requests will passthrough")
 	}
 
 	return &extprocv3.ProcessingResponse{
@@ -204,6 +228,7 @@ func readStatus(hdrs *extprocv3.HttpHeaders) (int, bool) {
 func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody, state *streamState) *extprocv3.ProcessingResponse {
 	// Empty bodies (e.g. trailing chunks, GETs) carry no protocol signal.
 	if len(body.Body) == 0 {
+		s.logger.Debug("request body passthrough", "reason", "empty_body")
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{},
@@ -228,11 +253,20 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 			} else {
 				s.logger.Warn("protocol parser selection failed", "error", err)
 			}
+		} else if parser != nil {
+			s.logger.Debug("protocol parser selected",
+				slog.String("parser", fmt.Sprintf("%T", parser)),
+			)
 		}
 	}
 
 	// If pre_call inspection isn't requested, pass through without inspecting.
 	if state.config == nil || !s.modeEnabled(state.config, metadata.ModePreCall) {
+		reason := "mode_disabled"
+		if state.config == nil {
+			reason = "no_config"
+		}
+		s.logger.Debug("request body passthrough", "reason", reason)
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{},
@@ -242,6 +276,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 
 	// No parser available, passthrough (parser-selection error already logged).
 	if state.parser == nil {
+		s.logger.Debug("request body passthrough", "reason", "no_parser")
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{},
@@ -260,8 +295,14 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 		}
 	}
 
+	s.logger.Debug("texts extracted from request", "count", len(texts))
 	// If not inspectable or no texts to inspect, passthrough
 	if !shouldInspect || len(texts) == 0 {
+		reason := "no_texts"
+		if !shouldInspect {
+			reason = "not_inspectable"
+		}
+		s.logger.Debug("request body passthrough", "reason", reason)
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
 				RequestBody: &extprocv3.BodyResponse{},
@@ -333,6 +374,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 	}
 
 	// ALLOW action - passthrough
+	s.logger.Debug("request body passthrough", "reason", "no_replacements")
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestBody{
 			RequestBody: &extprocv3.BodyResponse{},
@@ -354,6 +396,7 @@ func contentLengthMutation() *extprocv3.HeaderMutation {
 func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBody, state *streamState) *extprocv3.ProcessingResponse {
 	// Empty bodies (end-of-stream chunks, no-content responses) carry no payload to inspect.
 	if len(body.Body) == 0 {
+		s.logger.Debug("response body passthrough", "reason", "empty_body")
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
@@ -364,6 +407,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 	// Non-2xx upstream responses are typically plain-text or HTML error pages
 	// rather than JSON-RPC. Skip parsing entirely.
 	if state.skipResponseBody {
+		s.logger.Debug("response body passthrough", "reason", "skip_non_2xx")
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
@@ -373,6 +417,11 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 
 	// If no config is set or post_call mode is not enabled, passthrough
 	if state.config == nil || !s.modeEnabled(state.config, metadata.ModePostCall) {
+		reason := "mode_disabled"
+		if state.config == nil {
+			reason = "no_config"
+		}
+		s.logger.Debug("response body passthrough", "reason", reason)
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
@@ -383,6 +432,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 	// Reuse the parser identified from the request body. If the request body
 	// was empty or no parser matched, the protocol is unknown and we passthrough.
 	if state.parser == nil {
+		s.logger.Debug("response body passthrough", "reason", "no_parser")
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
@@ -404,8 +454,14 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 		}
 	}
 
+	s.logger.Debug("texts extracted from response", "count", len(texts))
 	// If not inspectable or no texts to inspect, passthrough
 	if !shouldInspect || len(texts) == 0 {
+		reason := "no_texts"
+		if !shouldInspect {
+			reason = "not_inspectable"
+		}
+		s.logger.Debug("response body passthrough", "reason", reason)
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{},
@@ -467,6 +523,11 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 				},
 			}
 		}
+		s.logger.Info("masked response body",
+			slog.Int("replacements", len(replacements)),
+			slog.Int("before_size", len(body.Body)),
+			slog.Int("after_size", len(modifiedBody)),
+		)
 
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
@@ -485,6 +546,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 	}
 
 	// ALLOW action - passthrough
+	s.logger.Debug("response body passthrough", "reason", "no_replacements")
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_ResponseBody{
 			ResponseBody: &extprocv3.BodyResponse{},
@@ -591,6 +653,7 @@ func (s *Server) modeEnabled(config *metadata.GuardrailConfig, mode metadata.Mod
 
 // createBlockResponse creates an ImmediateResponse with 403 status and JSON error body.
 func (s *Server) createBlockResponse(reason string) *extprocv3.ProcessingResponse {
+	s.logger.Info("blocking request", "reason", reason)
 	errorBody := map[string]interface{}{
 		"error": map[string]interface{}{
 			"code":    "GUARDRAIL_VIOLATION",
