@@ -3,6 +3,7 @@ package extproc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -208,8 +209,18 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 	// Identify the protocol from the first non-empty request body. The result
 	// (which may be nil) is shared with the response handler via streamState.
 	if !state.parserAttempted {
-		state.parser = s.protocolRegistry.SelectParser(ctx, body.Body, nil)
+		parser, err := s.protocolRegistry.SelectParser(ctx, body.Body, nil)
+		state.parser = parser
 		state.parserAttempted = true
+		if err != nil {
+			var nm *protocol.NoParserMatchError
+			if errors.As(err, &nm) {
+				log.Printf("protocol: no parser matched body (size=%d, prefix=%q, reasons=[%s])",
+					nm.BodySize, nm.Prefix, strings.Join(nm.Reasons, "; "))
+			} else {
+				log.Printf("protocol: parser selection failed: %v", err)
+			}
+		}
 	}
 
 	// If pre_call inspection isn't requested, pass through without inspecting.
@@ -221,7 +232,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 		}
 	}
 
-	// No parser available, passthrough (registry has already logged the reason).
+	// No parser available, passthrough (parser-selection error already logged).
 	if state.parser == nil {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestBody{
