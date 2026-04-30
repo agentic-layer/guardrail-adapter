@@ -47,7 +47,7 @@ func (m *mockProcessStream) Send(resp *extprocv3.ProcessingResponse) error {
 
 // TestPassthroughBehavior verifies that the server passes through all request types without modification.
 func TestPassthroughBehavior(t *testing.T) {
-	server := NewServer(nil)
+	server := NewServer(nil, nil)
 
 	testCases := []struct {
 		name     string
@@ -165,7 +165,7 @@ func TestPassthroughBehavior(t *testing.T) {
 
 // TestProcessStreamError verifies error handling in the Process stream.
 func TestProcessStreamError(t *testing.T) {
-	server := NewServer(nil)
+	server := NewServer(nil, nil)
 
 	t.Run("context_cancellation", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -219,7 +219,7 @@ func (m *mockFailingStream) Send(resp *extprocv3.ProcessingResponse) error {
 }
 
 func TestProcessSendError(t *testing.T) {
-	server := NewServer(nil)
+	server := NewServer(nil, nil)
 
 	stream := &mockFailingStream{
 		ctx:       context.Background(),
@@ -414,7 +414,7 @@ func runGuardrailTestCase(t *testing.T, tc struct {
 	wantMasked   bool
 	wantOriginal bool
 }) {
-	server := NewServer(nil)
+	server := NewServer(nil, nil)
 
 	// Create metadata context
 	var metadataCtx *corev3.Metadata
@@ -578,7 +578,7 @@ func TestStaticConfigShortCircuitsMetadata(t *testing.T) {
 		Modes:    []metadata.Mode{metadata.ModePreCall},
 		Presidio: &metadata.PresidioConfig{Endpoint: "http://static:8000"},
 	}
-	server := NewServer(staticCfg)
+	server := NewServer(nil, staticCfg)
 
 	// A MetadataContext that *would* configure a different provider if consulted.
 	md, err := structpb.NewStruct(map[string]interface{}{
@@ -628,7 +628,7 @@ func TestStaticConfigWorksWithoutMetadataOrHeaders(t *testing.T) {
 		Modes:    []metadata.Mode{metadata.ModePreCall},
 		Presidio: &metadata.PresidioConfig{Endpoint: "http://static:8000"},
 	}
-	server := NewServer(staticCfg)
+	server := NewServer(nil, staticCfg)
 	state := &streamState{requestMetadata: make(map[string]interface{})}
 	req := &extprocv3.ProcessingRequest{
 		Request: &extprocv3.ProcessingRequest_RequestHeaders{
@@ -647,7 +647,7 @@ func TestStaticConfigWorksWithoutMetadataOrHeaders(t *testing.T) {
 // must still fall back to the x-guardrail-* headers injected by the Lua filter.
 func TestHeadersFallbackWhenMetadataPresentButEmpty(t *testing.T) {
 	const testProvider = "presidio-api"
-	server := NewServer(nil)
+	server := NewServer(nil, nil)
 
 	emptyMD, err := structpb.NewStruct(map[string]interface{}{})
 	if err != nil {
@@ -689,7 +689,7 @@ func TestHeadersFallbackWhenMetadataPresentButEmpty(t *testing.T) {
 // guardrail configuration from x-guardrail-* HTTP request headers.
 func TestHeaderFallbackConfig(t *testing.T) {
 	const testProvider = "presidio-api"
-	server := NewServer(nil)
+	server := NewServer(nil, nil)
 
 	testCases := []struct {
 		name       string
@@ -844,7 +844,7 @@ func TestEmptyRequestBodySkipsParserSelection(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
-	server := NewServer(nil)
+	server := NewServer(nil, nil)
 
 	md, err := structpb.NewStruct(map[string]interface{}{
 		"guardrail.provider":                  "presidio-api",
@@ -911,7 +911,7 @@ func TestEmptyResponseBodyPassesThrough(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
-	server := NewServer(nil)
+	server := NewServer(nil, nil)
 
 	md, err := structpb.NewStruct(map[string]interface{}{
 		"guardrail.provider":                  "presidio-api",
@@ -969,7 +969,7 @@ func TestPostCallOnlyParserSharedFromRequest(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
-	server := NewServer(nil)
+	server := NewServer(nil, nil)
 
 	md, err := structpb.NewStruct(map[string]interface{}{
 		"guardrail.provider":                  "presidio-api",
@@ -1047,7 +1047,7 @@ func TestHeaderFallbackInRequestFlow(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
-	server := NewServer(nil)
+	server := NewServer(nil, nil)
 
 	// Create request headers with guardrail config
 	headerValues := []*corev3.HeaderValue{

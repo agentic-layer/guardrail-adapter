@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	envLevel  = "LOG_LEVEL"
-	envFormat = "LOG_FORMAT"
+	envLevel   = "LOG_LEVEL"
+	envFormat  = "LOG_FORMAT"
+	formatJSON = "json"
+	formatText = "text"
 )
 
 // New constructs a *slog.Logger configured from LOG_LEVEL and LOG_FORMAT
@@ -37,7 +39,7 @@ func New() (*slog.Logger, error) {
 	opts := &slog.HandlerOptions{Level: level}
 	var handler slog.Handler
 	switch format {
-	case "json":
+	case formatJSON:
 		handler = slog.NewJSONHandler(os.Stderr, opts)
 	default:
 		handler = slog.NewTextHandler(os.Stderr, opts)
@@ -70,14 +72,14 @@ func parseLevel(s string) (slog.Level, error) {
 
 func parseFormat(s string) (string, error) {
 	if s == "" {
-		return "text", nil
+		return formatText, nil
 	}
 	switch strings.ToLower(s) {
-	case "text":
-		return "text", nil
-	case "json":
-		return "json", nil
+	case formatText:
+		return formatText, nil
+	case formatJSON:
+		return formatJSON, nil
 	default:
-		return "text", fmt.Errorf("invalid LOG_FORMAT %q (using text)", s)
+		return formatText, fmt.Errorf("invalid LOG_FORMAT %q (using text)", s)
 	}
 }
