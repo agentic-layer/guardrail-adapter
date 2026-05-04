@@ -45,9 +45,11 @@ type streamState struct {
 	requestBuf       []byte
 	requestBuffered  bool // path decided: true = buffer-until-EOS, false = pass-through
 	requestPathSet   bool // whether path has been decided yet for the request side
+	requestAborted   bool // set after first oversize ImmediateResponse; silences later chunks
 	responseBuf      []byte
 	responseBuffered bool
 	responsePathSet  bool
+	responseAborted  bool // set after first oversize ImmediateResponse; silences later chunks
 }
 
 // NewServer creates a new ext_proc server. maxBodySize caps the per-direction
@@ -205,7 +207,7 @@ func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *s
 //     if response inspection is configured, fail closed with 501. If not,
 //     let the body pass through chunk-by-chunk via handleResponseBody.
 func (s *Server) handleResponseHeaders(hdrs *extprocv3.HttpHeaders, state *streamState) *extprocv3.ProcessingResponse {
-	if status, ok := readStatus(hdrs); ok && (status < 200 || status >= 300) {
+	if httpStatus, ok := readStatus(hdrs); ok && (httpStatus < 200 || httpStatus >= 300) {
 		state.skipResponseBody = true
 	}
 
@@ -323,12 +325,16 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 	}
 
 	// Path 2: buffer-until-EOS.
+	if state.requestAborted {
+		return streamedRequestBodyResponse(nil, eos, nil)
+	}
 	state.requestBuf = append(state.requestBuf, chunkBody...)
 	if s.maxBodySize > 0 && int64(len(state.requestBuf)) > s.maxBodySize {
 		s.logger.Info("blocking oversized request body",
 			slog.Int("size", len(state.requestBuf)),
 			slog.Int64("max", s.maxBodySize),
 		)
+		state.requestAborted = true
 		return s.createOversizeResponse(true, s.maxBodySize)
 	}
 	if !eos {
@@ -531,12 +537,16 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 		return streamedResponseBodyResponse(chunkBody, eos, nil)
 	}
 
+	if state.responseAborted {
+		return streamedResponseBodyResponse(nil, eos, nil)
+	}
 	state.responseBuf = append(state.responseBuf, chunkBody...)
 	if s.maxBodySize > 0 && int64(len(state.responseBuf)) > s.maxBodySize {
 		s.logger.Info("blocking oversized response body",
 			slog.Int("size", len(state.responseBuf)),
 			slog.Int64("max", s.maxBodySize),
 		)
+		state.responseAborted = true
 		return s.createOversizeResponse(false, s.maxBodySize)
 	}
 	if !eos {
