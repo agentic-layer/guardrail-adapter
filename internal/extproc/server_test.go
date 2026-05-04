@@ -1129,3 +1129,39 @@ func TestHeaderFallbackInRequestFlow(t *testing.T) {
 		t.Error("expected body to be mutated, but it matches original")
 	}
 }
+
+func TestStreamedRequestBodyResponseShape(t *testing.T) {
+	resp := streamedRequestBodyResponse([]byte("hello"), true, nil)
+	rb, ok := resp.Response.(*extprocv3.ProcessingResponse_RequestBody)
+	if !ok {
+		t.Fatalf("response = %T, want *ProcessingResponse_RequestBody", resp.Response)
+	}
+	mut, ok := rb.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse)
+	if !ok {
+		t.Fatalf("mutation = %T, want *BodyMutation_StreamedResponse", rb.RequestBody.Response.BodyMutation.Mutation)
+	}
+	if string(mut.StreamedResponse.Body) != "hello" {
+		t.Errorf("body = %q, want %q", mut.StreamedResponse.Body, "hello")
+	}
+	if !mut.StreamedResponse.EndOfStream {
+		t.Error("EndOfStream = false, want true")
+	}
+}
+
+func TestStreamedResponseBodyResponseShape(t *testing.T) {
+	resp := streamedResponseBodyResponse([]byte("world"), false, nil)
+	rb, ok := resp.Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	if !ok {
+		t.Fatalf("response = %T, want *ProcessingResponse_ResponseBody", resp.Response)
+	}
+	mut, ok := rb.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse)
+	if !ok {
+		t.Fatalf("mutation = %T, want *BodyMutation_StreamedResponse", rb.ResponseBody.Response.BodyMutation.Mutation)
+	}
+	if string(mut.StreamedResponse.Body) != "world" {
+		t.Errorf("body = %q, want %q", mut.StreamedResponse.Body, "world")
+	}
+	if mut.StreamedResponse.EndOfStream {
+		t.Error("EndOfStream = true, want false")
+	}
+}
