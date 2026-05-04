@@ -71,7 +71,7 @@ if ! response=$(printf '%s' "$stream" | grpcurl -plaintext -d @ "${ADAPTER_GRPC_
     exit 1
 fi
 
-masked_body_b64=$(echo "$response" | jq -sr '[.[] | .requestBody.response.bodyMutation.body? // empty | select(. != "")] | .[0] // ""')
+masked_body_b64=$(echo "$response" | jq -sr '[.[] | .requestBody.response.bodyMutation.streamedResponse.body? // empty | select(. != "")] | .[0] // ""')
 
 if [ -z "$masked_body_b64" ]; then
     log_error "✗ Adapter did not return a body mutation — PII was not masked"
