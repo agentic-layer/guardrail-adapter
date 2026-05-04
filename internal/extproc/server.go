@@ -392,6 +392,52 @@ func contentLengthMutation() *extprocv3.HeaderMutation {
 	}
 }
 
+// streamedRequestBodyResponse constructs a ProcessingResponse for the request
+// direction carrying a StreamedBodyResponse mutation. Use body=nil to "hold"
+// (emit no bytes downstream while we accumulate); use a non-nil body to emit
+// (either echoing the original chunk or sending the assembled+mutated body).
+func streamedRequestBodyResponse(body []byte, endOfStream bool, headerMutation *extprocv3.HeaderMutation) *extprocv3.ProcessingResponse {
+	return &extprocv3.ProcessingResponse{
+		Response: &extprocv3.ProcessingResponse_RequestBody{
+			RequestBody: &extprocv3.BodyResponse{
+				Response: &extprocv3.CommonResponse{
+					HeaderMutation: headerMutation,
+					BodyMutation: &extprocv3.BodyMutation{
+						Mutation: &extprocv3.BodyMutation_StreamedResponse{
+							StreamedResponse: &extprocv3.StreamedBodyResponse{
+								Body:        body,
+								EndOfStream: endOfStream,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// streamedResponseBodyResponse is the response-direction counterpart to
+// streamedRequestBodyResponse. See its docstring for body=nil semantics.
+func streamedResponseBodyResponse(body []byte, endOfStream bool, headerMutation *extprocv3.HeaderMutation) *extprocv3.ProcessingResponse {
+	return &extprocv3.ProcessingResponse{
+		Response: &extprocv3.ProcessingResponse_ResponseBody{
+			ResponseBody: &extprocv3.BodyResponse{
+				Response: &extprocv3.CommonResponse{
+					HeaderMutation: headerMutation,
+					BodyMutation: &extprocv3.BodyMutation{
+						Mutation: &extprocv3.BodyMutation_StreamedResponse{
+							StreamedResponse: &extprocv3.StreamedBodyResponse{
+								Body:        body,
+								EndOfStream: endOfStream,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 // handleResponseBody processes the response body with guardrail inspection.
 func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBody, state *streamState) *extprocv3.ProcessingResponse {
 	// Empty bodies (end-of-stream chunks, no-content responses) carry no payload to inspect.
