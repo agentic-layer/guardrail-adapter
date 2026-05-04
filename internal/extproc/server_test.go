@@ -1404,3 +1404,99 @@ func TestResponseBodyMultiChunkPassthroughEchoes(t *testing.T) {
 		t.Errorf("chunk 2 reply: body=%q EOS=%v, want %q EOS=true", lastSR.Body, lastSR.EndOfStream, chunk2)
 	}
 }
+
+// TestSSEResponseFailsClosedWhenInspecting verifies that with response
+// inspection configured, a text/event-stream response triggers an
+// ImmediateResponse 501.
+func TestSSEResponseFailsClosedWhenInspecting(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	server := NewServer(nil, nil)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md}}
+
+	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`)
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: reqBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{
+			Headers: &corev3.HeaderMap{Headers: []*corev3.HeaderValue{
+				{Key: ":status", Value: "200"},
+				{Key: "content-type", Value: "text/event-stream"},
+			}},
+		}}, MetadataContext: metadataCtx},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if len(stream.sent) != 3 {
+		t.Fatalf("sent %d responses, want 3", len(stream.sent))
+	}
+
+	headersResp := stream.sent[2]
+	imm, ok := headersResp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
+	if !ok {
+		t.Fatalf("response = %T, want *ProcessingResponse_ImmediateResponse", headersResp.Response)
+	}
+	if imm.ImmediateResponse.Status.Code != 501 {
+		t.Errorf("status = %d, want 501", imm.ImmediateResponse.Status.Code)
+	}
+	var errBody map[string]interface{}
+	if err := json.Unmarshal(imm.ImmediateResponse.Body, &errBody); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if obj, _ := errBody["error"].(map[string]interface{}); obj == nil || obj["code"] != "GUARDRAIL_UNSUPPORTED" {
+		t.Errorf("error code = %v, want GUARDRAIL_UNSUPPORTED", errBody["error"])
+	}
+}
+
+// TestSSEResponsePassesThroughWhenNotInspecting verifies that without
+// post_call inspection configured, a text/event-stream response is echoed
+// chunk-by-chunk and no ImmediateResponse is emitted.
+func TestSSEResponsePassesThroughWhenNotInspecting(t *testing.T) {
+	server := NewServer(nil, nil)
+
+	chunk := []byte("event: message\ndata: hello\n\n")
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}},
+		{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{
+			Headers: &corev3.HeaderMap{Headers: []*corev3.HeaderValue{
+				{Key: ":status", Value: "200"},
+				{Key: "content-type", Value: "text/event-stream"},
+			}},
+		}}},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: chunk, EndOfStream: true}}},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	for i, sent := range stream.sent {
+		if _, ok := sent.Response.(*extprocv3.ProcessingResponse_ImmediateResponse); ok {
+			t.Fatalf("sent[%d] is ImmediateResponse, want passthrough", i)
+		}
+	}
+	bodyResp := stream.sent[2].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	sr := bodyResp.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if string(sr.Body) != string(chunk) || !sr.EndOfStream {
+		t.Errorf("chunk reply: body=%q EOS=%v, want %q EOS=true", sr.Body, sr.EndOfStream, chunk)
+	}
+}
