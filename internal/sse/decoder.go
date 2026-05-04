@@ -145,3 +145,30 @@ func (d *Decoder) processLine(line []byte) {
 		d.data = append(d.data, cp)
 	}
 }
+
+// Flush returns the in-progress event when end-of-stream arrives without
+// a trailing blank line, or nil when the in-progress event is empty.
+// Treats any unterminated trailing bytes as a final line.
+func (d *Decoder) Flush() (*Event, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
+	if len(d.buf) > 0 {
+		// Move the unterminated tail into raw and process it as a line.
+		d.raw = append(d.raw, d.buf...)
+		line := d.buf
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		d.buf = nil
+		if len(line) > 0 {
+			d.processLine(line)
+		}
+	}
+	if !d.seen {
+		return nil, nil
+	}
+	ev := d.buildEvent()
+	d.reset()
+	return &ev, nil
+}
