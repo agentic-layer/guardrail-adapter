@@ -1695,3 +1695,131 @@ func TestSSEResponseInspectionMasksToolCallResultEvent(t *testing.T) {
 		t.Errorf("body missing source id: 99 line: %q", sr.Body)
 	}
 }
+
+// TestSSEResponseInspectionBlockBeforeAnyEmit verifies that a provider
+// block on the first event in the stream — when no bytes have been
+// emitted downstream yet — produces an ImmediateResponse 403.
+func TestSSEResponseInspectionBlockBeforeAnyEmit(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	server := NewServer(nil, nil, 0)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"BLOCK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md}}
+
+	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`)
+	resultData := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"contact john@example.com please"}]}}`
+	streamBody := []byte("event: message\ndata: " + resultData + "\n\n")
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: reqBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{
+			Headers: &corev3.HeaderMap{Headers: []*corev3.HeaderValue{
+				{Key: ":status", Value: "200"},
+				{Key: "content-type", Value: "text/event-stream"},
+			}},
+		}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: streamBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	imm, ok := stream.sent[3].Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
+	if !ok {
+		t.Fatalf("response = %T, want *ProcessingResponse_ImmediateResponse", stream.sent[3].Response)
+	}
+	if imm.ImmediateResponse.Status.Code != 403 {
+		t.Errorf("status = %d, want 403", imm.ImmediateResponse.Status.Code)
+	}
+}
+
+// TestSSEResponseInspectionBlockAfterPriorEmit verifies that when a
+// provider block fires on a later event after earlier events have been
+// forwarded, the adapter emits a JSON-RPC error event and EOSes the
+// stream rather than 403'ing.
+func TestSSEResponseInspectionBlockAfterPriorEmit(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	server := NewServer(nil, nil, 0)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"BLOCK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md}}
+
+	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`)
+	notif := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":50}}\n\n"
+	resultData := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"contact john@example.com please"}]}}`
+	resultEvent := "event: message\ndata: " + resultData + "\n\n"
+
+	// Send the notification in chunk 1 (forwarded), then the
+	// to-be-blocked event in chunk 2.
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: reqBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{
+			Headers: &corev3.HeaderMap{Headers: []*corev3.HeaderValue{
+				{Key: ":status", Value: "200"},
+				{Key: "content-type", Value: "text/event-stream"},
+			}},
+		}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: []byte(notif), EndOfStream: false}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: []byte(resultEvent), EndOfStream: true}}, MetadataContext: metadataCtx},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if len(stream.sent) != 5 {
+		t.Fatalf("sent %d responses, want 5", len(stream.sent))
+	}
+
+	// First body chunk: notification forwarded verbatim, EOS=false.
+	first := stream.sent[3].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	firstSR := first.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if !bytes.Equal(firstSR.Body, []byte(notif)) {
+		t.Errorf("first chunk body = %q, want %q", firstSR.Body, notif)
+	}
+	if firstSR.EndOfStream {
+		t.Error("first chunk EOS = true, want false")
+	}
+
+	// Second body chunk: error event with EOS=true.
+	second := stream.sent[4].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	secondSR := second.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if !secondSR.EndOfStream {
+		t.Error("second chunk EOS = false, want true")
+	}
+	if !bytes.Contains(secondSR.Body, []byte(`"error":{"code":-32000,"message":"blocked by guardrail"}`)) {
+		t.Errorf("second chunk body missing error payload: %q", secondSR.Body)
+	}
+	// id mirrors the source event's JSON-RPC id (1).
+	if !bytes.Contains(secondSR.Body, []byte(`"id":1`)) {
+		t.Errorf("second chunk body missing id mirror: %q", secondSR.Body)
+	}
+}
