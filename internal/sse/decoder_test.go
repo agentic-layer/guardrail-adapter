@@ -100,3 +100,81 @@ func TestDecoderMultiLineDataJoinedWithNewline(t *testing.T) {
 		t.Errorf("Data = %q, want %q", events[0].Data, "line one\nline two")
 	}
 }
+
+func TestDecoderCRLFEndings(t *testing.T) {
+	d := NewDecoder(0)
+	chunk := []byte("event: message\r\ndata: hello\r\n\r\n")
+	events, err := d.Write(chunk)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	if !bytes.Equal(events[0].Data, []byte("hello")) {
+		t.Errorf("Data = %q, want %q", events[0].Data, "hello")
+	}
+	if events[0].Name != "message" {
+		t.Errorf("Name = %q, want %q", events[0].Name, "message")
+	}
+}
+
+func TestDecoderCommentLineIgnored(t *testing.T) {
+	d := NewDecoder(0)
+	chunk := []byte(":keepalive\ndata: hi\n\n")
+	events, err := d.Write(chunk)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	if !bytes.Equal(events[0].Data, []byte("hi")) {
+		t.Errorf("Data = %q, want %q", events[0].Data, "hi")
+	}
+}
+
+func TestDecoderUnknownFieldIgnored(t *testing.T) {
+	d := NewDecoder(0)
+	chunk := []byte("retry: 1000\nfoo: bar\ndata: hi\n\n")
+	events, err := d.Write(chunk)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	if !bytes.Equal(events[0].Data, []byte("hi")) {
+		t.Errorf("Data = %q, want %q", events[0].Data, "hi")
+	}
+}
+
+func TestDecoderDefaultEventName(t *testing.T) {
+	d := NewDecoder(0)
+	events, err := d.Write([]byte("data: hi\n\n"))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	if events[0].Name != "message" {
+		t.Errorf("Name = %q, want %q (default)", events[0].Name, "message")
+	}
+}
+
+func TestDecoderBlankLinesBetweenEventsAreNoOps(t *testing.T) {
+	// Several blank lines before the first real event must not produce
+	// any events. Verifies the d.seen guard.
+	d := NewDecoder(0)
+	events, err := d.Write([]byte("\n\n\ndata: hi\n\n"))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	if !bytes.Equal(events[0].Data, []byte("hi")) {
+		t.Errorf("Data = %q, want %q", events[0].Data, "hi")
+	}
+}
