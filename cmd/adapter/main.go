@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/agentic-layer/guardrail-adapter/internal/extproc"
 	"github.com/agentic-layer/guardrail-adapter/internal/logging"
 	"github.com/agentic-layer/guardrail-adapter/internal/metadata"
+	"github.com/dustin/go-humanize"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -24,7 +26,17 @@ func main() {
 	// Parse command-line flags
 	addr := flag.String("addr", ":9001", "Address to listen on (format: host:port)")
 	healthAddr := flag.String("health-addr", ":8080", "Health check HTTP server address")
+	maxBodySize := flag.String("max-body-size", "1MiB",
+		"Maximum buffered body size per direction (e.g. 512KiB, 2MiB). "+
+			"Bodies that exceed this in the inspection path are rejected with "+
+			"HTTP 413 (request) or 502 (response). Pass-through traffic is unaffected.")
 	flag.Parse()
+
+	maxBodyBytes, err := humanize.ParseBytes(*maxBodySize)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid --max-body-size %q: %v\n", *maxBodySize, err)
+		os.Exit(2)
+	}
 
 	// Build the application logger from LOG_LEVEL / LOG_FORMAT env vars.
 	// Invalid values warn and fall back to defaults so deploys are not broken
@@ -59,7 +71,11 @@ func main() {
 	grpcServer := grpc.NewServer()
 
 	// Register ext_proc service
-	extprocServer := extproc.NewServer(logger, staticCfg)
+	if maxBodyBytes > math.MaxInt64 {
+		fmt.Fprintf(os.Stderr, "--max-body-size %q exceeds max int64\n", *maxBodySize)
+		os.Exit(2)
+	}
+	extprocServer := extproc.NewServer(logger, staticCfg, int64(maxBodyBytes))
 	extprocv3.RegisterExternalProcessorServer(grpcServer, extprocServer)
 
 	// Register health check service
