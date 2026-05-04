@@ -690,9 +690,56 @@ func (s *Server) processSSEEvent(ctx context.Context, state *streamState, ev sse
 	if len(ev.Data) == 0 {
 		return ev.Raw, ""
 	}
-	// Non-tool-call shapes (notifications, server-initiated requests)
-	// surface as parse errors or zero extractions; pass through verbatim.
-	return ev.Raw, ""
+
+	texts, shouldInspect, err := state.parser.ParseResponse(ctx, ev.Data)
+	if err != nil || !shouldInspect || len(texts) == 0 {
+		// Notifications, server-initiated requests, and other non
+		// tool-call shapes naturally land here.
+		return ev.Raw, ""
+	}
+
+	prov, err := s.createProvider(state.config)
+	if err != nil {
+		s.logger.Warn("failed to create provider", "error", err)
+		return ev.Raw, ""
+	}
+
+	replacements := make(map[string]string)
+	for _, text := range texts {
+		var processed string
+		if reqMeta, ok := state.requestMetadata[text.Path]; ok {
+			pt, perr := prov.ProcessResponse(ctx, text.Value, reqMeta)
+			if perr != nil {
+				s.logger.Warn("failed to process response text", "error", perr, "path", text.Path)
+				continue
+			}
+			processed = pt
+		} else {
+			result, perr := prov.ProcessRequest(ctx, text.Value)
+			if perr != nil {
+				return nil, perr.Error()
+			}
+			processed = result.Text
+		}
+		if processed != text.Value {
+			replacements[text.Path] = processed
+		}
+	}
+
+	if len(replacements) == 0 {
+		return ev.Raw, ""
+	}
+
+	mutated, err := state.parser.ReplaceTexts(ctx, ev.Data, replacements)
+	if err != nil {
+		s.logger.Warn("failed to replace texts in SSE event", "error", err)
+		return ev.Raw, ""
+	}
+	s.logger.Info("masked SSE event",
+		slog.Int("replacements", len(replacements)),
+		slog.Int("event_size_before", len(ev.Raw)),
+	)
+	return sse.Encode(ev.Name, ev.ID, mutated), ""
 }
 
 // handleSSEBlock builds the response when a provider blocks an event.
