@@ -28,6 +28,9 @@ go.work.sum
 compose.yml
 Tiltfile
 Makefile
+/test
+/deploy
+/bin
 
 # IDE
 .idea/
@@ -35,6 +38,7 @@ Makefile
 *.swp
 *.swo
 *~
+.claude
 
 # OS specific
 .DS_Store
@@ -46,3 +50,4 @@ Thumbs.db
 # Documentation
 *.md
 !README.md
+/docs
