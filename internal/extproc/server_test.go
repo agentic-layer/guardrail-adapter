@@ -915,12 +915,14 @@ func TestEmptyRequestBodySkipsParserSelection(t *testing.T) {
 		t.Errorf("empty request body passthrough: body=%q EOS=%v, want empty + EOS=true", sr.Body, sr.EndOfStream)
 	}
 
+	const expectedRespBody = `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"john@example.com"}]}}`
 	respBody, ok := stream.sent[2].Response.(*extprocv3.ProcessingResponse_ResponseBody)
 	if !ok {
 		t.Fatalf("expected ResponseBody response, got %T", stream.sent[2].Response)
 	}
-	if respBody.ResponseBody.Response != nil && respBody.ResponseBody.Response.BodyMutation != nil {
-		t.Error("response body should be passthrough when no parser was selected, but got BodyMutation")
+	sr = respBody.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if string(sr.Body) != expectedRespBody || !sr.EndOfStream {
+		t.Errorf("response passthrough: body=%q EOS=%v, want %q EOS=true", sr.Body, sr.EndOfStream, expectedRespBody)
 	}
 }
 
@@ -978,8 +980,9 @@ func TestEmptyResponseBodyPassesThrough(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ResponseBody response, got %T", stream.sent[2].Response)
 	}
-	if respBody.ResponseBody.Response != nil && respBody.ResponseBody.Response.BodyMutation != nil {
-		t.Error("empty response body should be passthrough, but got BodyMutation")
+	sr := respBody.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if len(sr.Body) != 0 || !sr.EndOfStream {
+		t.Errorf("empty response passthrough: body=%q EOS=%v, want empty + EOS=true", sr.Body, sr.EndOfStream)
 	}
 }
 
@@ -1050,14 +1053,17 @@ func TestPostCallOnlyParserSharedFromRequest(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ResponseBody response, got %T", stream.sent[2].Response)
 	}
-	if respBody.ResponseBody.Response == nil || respBody.ResponseBody.Response.BodyMutation == nil {
-		t.Fatal("expected BodyMutation on response (mask), got passthrough")
+	sr2, ok := respBody.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse)
+	if !ok {
+		t.Fatalf("mutation = %T, want *BodyMutation_StreamedResponse", respBody.ResponseBody.Response.BodyMutation.Mutation)
 	}
-	mutated := respBody.ResponseBody.Response.BodyMutation.GetBody()
-	if len(mutated) == 0 {
+	if !sr2.StreamedResponse.EndOfStream {
+		t.Error("EndOfStream = false, want true on masked EOS reply")
+	}
+	if len(sr2.StreamedResponse.Body) == 0 {
 		t.Error("expected non-empty mutated response body")
 	}
-	if string(mutated) == string(responseBody) {
+	if string(sr2.StreamedResponse.Body) == string(responseBody) {
 		t.Error("expected mutated response body to differ from original")
 	}
 }
@@ -1296,6 +1302,104 @@ func TestRequestBodyMultiChunkPassthroughEchoes(t *testing.T) {
 
 	last := stream.sent[2].Response.(*extprocv3.ProcessingResponse_RequestBody)
 	lastSR := last.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if string(lastSR.Body) != string(chunk2) || !lastSR.EndOfStream {
+		t.Errorf("chunk 2 reply: body=%q EOS=%v, want %q EOS=true", lastSR.Body, lastSR.EndOfStream, chunk2)
+	}
+}
+
+// TestResponseBodyBufferedUntilEOSMasks exercises post_call inspection on a
+// streamed response body delivered in multiple chunks.
+func TestResponseBodyBufferedUntilEOSMasks(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	server := NewServer(nil, nil)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{
+		FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md},
+	}
+
+	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`)
+	full := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"contact john@example.com"}]}}`
+	respChunk1 := []byte(full[:50])
+	respChunk2 := []byte(full[50:])
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: reqBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: respChunk1, EndOfStream: false}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: respChunk2, EndOfStream: true}}, MetadataContext: metadataCtx},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if len(stream.sent) != 5 {
+		t.Fatalf("sent %d responses, want 5", len(stream.sent))
+	}
+
+	// Intermediate response chunk: held.
+	mid := stream.sent[3].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	midSR := mid.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if len(midSR.Body) != 0 || midSR.EndOfStream {
+		t.Errorf("intermediate reply: body=%q EOS=%v, want empty + EOS=false", midSR.Body, midSR.EndOfStream)
+	}
+
+	// EOS reply: assembled + mutated.
+	end := stream.sent[4].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	endSR := end.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if !endSR.EndOfStream {
+		t.Error("EOS reply: EndOfStream = false, want true")
+	}
+	if len(endSR.Body) == 0 {
+		t.Fatal("EOS reply: body is empty, want assembled+mutated body")
+	}
+	if string(endSR.Body) == full {
+		t.Error("EOS reply: body matches original; expected masked")
+	}
+}
+
+// TestResponseBodyMultiChunkPassthroughEchoes verifies that without
+// inspection configured, response chunks are echoed without buffering.
+func TestResponseBodyMultiChunkPassthroughEchoes(t *testing.T) {
+	server := NewServer(nil, nil)
+
+	chunk1 := []byte(`{"jsonrpc":"2.0",`)
+	chunk2 := []byte(`"id":1,"result":"ok"}`)
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}},
+		{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{}}},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: chunk1, EndOfStream: false}}},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: chunk2, EndOfStream: true}}},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	first := stream.sent[2].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	firstSR := first.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if string(firstSR.Body) != string(chunk1) || firstSR.EndOfStream {
+		t.Errorf("chunk 1 reply: body=%q EOS=%v, want %q EOS=false", firstSR.Body, firstSR.EndOfStream, chunk1)
+	}
+
+	last := stream.sent[3].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	lastSR := last.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
 	if string(lastSR.Body) != string(chunk2) || !lastSR.EndOfStream {
 		t.Errorf("chunk 2 reply: body=%q EOS=%v, want %q EOS=true", lastSR.Body, lastSR.EndOfStream, chunk2)
 	}
