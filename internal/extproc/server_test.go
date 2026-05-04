@@ -1,6 +1,7 @@
 package extproc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -1406,10 +1407,12 @@ func TestResponseBodyMultiChunkPassthroughEchoes(t *testing.T) {
 	}
 }
 
-// TestSSEResponseFailsClosedWhenInspecting verifies that with response
-// inspection configured, a text/event-stream response triggers an
-// ImmediateResponse 501.
-func TestSSEResponseFailsClosedWhenInspecting(t *testing.T) {
+// TestSSEResponseInspectionForwardsNonInspectableEvents verifies that
+// with post_call inspection configured, a text/event-stream response
+// runs through the frame-aware path: each event is forwarded verbatim
+// when its data: payload is not a tool-call response. No
+// ImmediateResponse is emitted.
+func TestSSEResponseInspectionForwardsNonInspectableEvents(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
@@ -1429,6 +1432,9 @@ func TestSSEResponseFailsClosedWhenInspecting(t *testing.T) {
 	metadataCtx := &corev3.Metadata{FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md}}
 
 	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`)
+	// A notification — has no result, parser.ParseResponse returns no
+	// extractions, so it must pass through verbatim.
+	notif := []byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":50}}\n\n")
 
 	requests := []*extprocv3.ProcessingRequest{
 		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
@@ -1439,30 +1445,26 @@ func TestSSEResponseFailsClosedWhenInspecting(t *testing.T) {
 				{Key: "content-type", Value: "text/event-stream"},
 			}},
 		}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: notif, EndOfStream: true}}, MetadataContext: metadataCtx},
 	}
 
 	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
 	if err := server.Process(stream); err != nil {
 		t.Fatalf("Process() error = %v", err)
 	}
-	if len(stream.sent) != 3 {
-		t.Fatalf("sent %d responses, want 3", len(stream.sent))
-	}
 
-	headersResp := stream.sent[2]
-	imm, ok := headersResp.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
-	if !ok {
-		t.Fatalf("response = %T, want *ProcessingResponse_ImmediateResponse", headersResp.Response)
+	for i, sent := range stream.sent {
+		if _, ok := sent.Response.(*extprocv3.ProcessingResponse_ImmediateResponse); ok {
+			t.Fatalf("sent[%d] is ImmediateResponse, want frame-aware passthrough", i)
+		}
 	}
-	if imm.ImmediateResponse.Status.Code != 501 {
-		t.Errorf("status = %d, want 501", imm.ImmediateResponse.Status.Code)
+	bodyResp := stream.sent[3].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	sr := bodyResp.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if !bytes.Equal(sr.Body, notif) {
+		t.Errorf("body = %q, want %q (verbatim)", sr.Body, notif)
 	}
-	var errBody map[string]interface{}
-	if err := json.Unmarshal(imm.ImmediateResponse.Body, &errBody); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-	if obj, _ := errBody["error"].(map[string]interface{}); obj == nil || obj["code"] != "GUARDRAIL_UNSUPPORTED" {
-		t.Errorf("error code = %v, want GUARDRAIL_UNSUPPORTED", errBody["error"])
+	if !sr.EndOfStream {
+		t.Error("EndOfStream = false, want true")
 	}
 }
 

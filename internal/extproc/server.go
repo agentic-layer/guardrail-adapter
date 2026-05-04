@@ -22,6 +22,7 @@ import (
 	"github.com/agentic-layer/guardrail-adapter/internal/protocol/mcpparser"
 	"github.com/agentic-layer/guardrail-adapter/internal/provider"
 	"github.com/agentic-layer/guardrail-adapter/internal/provider/presidio"
+	"github.com/agentic-layer/guardrail-adapter/internal/sse"
 )
 
 // Server implements the Envoy ExternalProcessor service.
@@ -49,7 +50,9 @@ type streamState struct {
 	responseBuf      []byte
 	responseBuffered bool
 	responsePathSet  bool
-	responseAborted  bool // set after first oversize ImmediateResponse; silences later chunks
+	responseAborted  bool         // set after first oversize ImmediateResponse; silences later chunks
+	sseDec           *sse.Decoder // non-nil iff frame-aware SSE path is active
+	sseEmitted       bool         // true once any downstream byte has been sent on SSE path
 }
 
 // NewServer creates a new ext_proc server. maxBodySize caps the per-direction
@@ -203,25 +206,20 @@ func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *s
 // handleResponseHeaders inspects the upstream response. Two decisions:
 //  1. Non-2xx responses are typically plain-text/HTML, not JSON-RPC; skip
 //     response-body inspection (today's skip_non_2xx workaround).
-//  2. text/event-stream responses cannot be inspected as whole documents;
-//     if response inspection is configured, fail closed with 501. If not,
-//     let the body pass through chunk-by-chunk via handleResponseBody.
+//  2. text/event-stream responses are inspected via the frame-aware SSE
+//     path when post_call inspection is configured and a parser was
+//     sniffed from the request side; otherwise they pass through
+//     chunk-by-chunk like any other body.
 func (s *Server) handleResponseHeaders(hdrs *extprocv3.HttpHeaders, state *streamState) *extprocv3.ProcessingResponse {
 	if httpStatus, ok := readStatus(hdrs); ok && (httpStatus < 200 || httpStatus >= 300) {
 		state.skipResponseBody = true
 	}
 
 	if isSSE(hdrs) && state.config != nil && s.modeEnabled(state.config, metadata.ModePostCall) && state.parser != nil && !state.skipResponseBody {
-		s.logger.Info("blocking SSE response (guardrail cannot inspect text/event-stream)")
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_ImmediateResponse{
-				ImmediateResponse: &extprocv3.ImmediateResponse{
-					Status:  &typev3.HttpStatus{Code: typev3.StatusCode_NotImplemented},
-					Body:    []byte(`{"error":{"code":"GUARDRAIL_UNSUPPORTED","message":"guardrail adapter cannot inspect text/event-stream responses"}}`),
-					Details: "sse_response_unsupported",
-				},
-			},
-		}
+		state.sseDec = sse.NewDecoder(int(s.maxBodySize))
+		s.logger.Debug("SSE post_call inspection: frame-aware path active",
+			slog.Int64("max_event_size", s.maxBodySize),
+		)
 	}
 
 	return &extprocv3.ProcessingResponse{
@@ -508,6 +506,9 @@ func streamedResponseBodyResponse(body []byte, endOfStream bool, headerMutation 
 
 // handleResponseBody mirrors handleRequestBody for the response direction.
 func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBody, state *streamState) *extprocv3.ProcessingResponse {
+	if state.sseDec != nil {
+		return s.handleSSEResponseBody(ctx, body, state)
+	}
 	chunkBody := body.GetBody()
 	eos := body.GetEndOfStream()
 
@@ -631,6 +632,123 @@ func (s *Server) inspectAndEmitResponse(ctx context.Context, state *streamState)
 		slog.Int("after_size", len(modifiedBody)),
 	)
 	return streamedResponseBodyResponse(modifiedBody, true, contentLengthMutation())
+}
+
+// handleSSEResponseBody implements the frame-aware SSE inspection path.
+// Each completed SSE event is run through processSSEEvent; the resulting
+// bytes (verbatim, mutated, or error event) are written downstream as a
+// StreamedResponse. Non-final chunks that don't complete an event reply
+// with body=nil to hold downstream bytes until the next event boundary.
+func (s *Server) handleSSEResponseBody(ctx context.Context, body *extprocv3.HttpBody, state *streamState) *extprocv3.ProcessingResponse {
+	chunkBody := body.GetBody()
+	eos := body.GetEndOfStream()
+
+	if state.responseAborted {
+		return streamedResponseBodyResponse(nil, eos, nil)
+	}
+
+	// Decoder.Write checks the per-event cap before scanning lines, so a
+	// chunk that contains a complete event followed by oversize bytes
+	// short-circuits with ErrEventTooLarge — the complete event's bytes
+	// in this same chunk are dropped along with the oversize tail. The
+	// stream still terminates cleanly with the error event + EOS below.
+	events, err := state.sseDec.Write(chunkBody)
+	if errors.Is(err, sse.ErrEventTooLarge) {
+		return s.handleSSEOversize(state)
+	}
+
+	var out []byte
+	for _, ev := range events {
+		emit, blockReason := s.processSSEEvent(ctx, state, ev)
+		if blockReason != "" {
+			return s.handleSSEBlock(state, ev, blockReason, out)
+		}
+		out = append(out, emit...)
+	}
+
+	if eos {
+		if final, _ := state.sseDec.Flush(); final != nil {
+			emit, blockReason := s.processSSEEvent(ctx, state, *final)
+			if blockReason != "" {
+				return s.handleSSEBlock(state, *final, blockReason, out)
+			}
+			out = append(out, emit...)
+		}
+	}
+
+	if len(out) > 0 {
+		state.sseEmitted = true
+	}
+	return streamedResponseBodyResponse(out, eos, nil)
+}
+
+// processSSEEvent inspects one SSE event. Returns the bytes to emit
+// (the original Raw if the event is non-inspectable or no replacements
+// were made; canonically re-encoded bytes after mutation) and a
+// non-empty blockReason when the provider rejects the event.
+func (s *Server) processSSEEvent(ctx context.Context, state *streamState, ev sse.Event) ([]byte, string) {
+	if len(ev.Data) == 0 {
+		return ev.Raw, ""
+	}
+	// Non-tool-call shapes (notifications, server-initiated requests)
+	// surface as parse errors or zero extractions; pass through verbatim.
+	return ev.Raw, ""
+}
+
+// handleSSEBlock builds the response when a provider blocks an event.
+// If no bytes have been emitted yet AND the current chunk has not yet
+// emitted earlier events, swap to ImmediateResponse{403}. Otherwise
+// append a JSON-RPC error event and EOS the stream.
+func (s *Server) handleSSEBlock(state *streamState, ev sse.Event, reason string, prior []byte) *extprocv3.ProcessingResponse {
+	s.logger.Info("blocking SSE event", "reason", reason)
+	state.responseAborted = true
+	if !state.sseEmitted && len(prior) == 0 {
+		return s.createBlockResponse(reason)
+	}
+	errEvent := buildSSEErrorEvent(ev, "blocked by guardrail", -32000)
+	out := append(prior, errEvent...)
+	state.sseEmitted = true
+	return streamedResponseBodyResponse(out, true, nil)
+}
+
+// handleSSEOversize builds the response when an SSE event exceeds the
+// per-event byte cap. Same fork as handleSSEBlock but with 502 (no
+// prior bytes) or a generic oversize error event.
+func (s *Server) handleSSEOversize(state *streamState) *extprocv3.ProcessingResponse {
+	s.logger.Info("blocking oversized SSE event",
+		slog.Int("pending", state.sseDec.Pending()),
+		slog.Int64("max", s.maxBodySize),
+	)
+	state.responseAborted = true
+	if !state.sseEmitted {
+		return s.createOversizeResponse(false, s.maxBodySize)
+	}
+	payload := []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"response body too large"}}`)
+	errEvent := sse.Encode("message", "", payload)
+	state.sseEmitted = true
+	return streamedResponseBodyResponse(errEvent, true, nil)
+}
+
+// buildSSEErrorEvent constructs a JSON-RPC error event mirroring the
+// offending event's id when parseable. message is the error.message;
+// code is the JSON-RPC error code.
+func buildSSEErrorEvent(srcEvent sse.Event, message string, code int) []byte {
+	var msg struct {
+		ID interface{} `json:"id"`
+	}
+	if len(srcEvent.Data) > 0 {
+		_ = json.Unmarshal(srcEvent.Data, &msg)
+	}
+	payload := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      msg.ID,
+		"error": map[string]interface{}{
+			"code":    code,
+			"message": message,
+		},
+	}
+	data, _ := json.Marshal(payload)
+	return sse.Encode(srcEvent.Name, srcEvent.ID, data)
 }
 
 // parseGuardrailHeaders reads guardrail config from x-guardrail-* HTTP request headers.
