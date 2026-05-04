@@ -16,6 +16,8 @@ spec:
           port: 9001
       processingMode:
         request:
-          body: Buffered
+          body: FullDuplexStreamed
+        response:
+          body: FullDuplexStreamed
       messageTimeout: 5s
       failOpen: false
