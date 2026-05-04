@@ -1823,3 +1823,123 @@ func TestSSEResponseInspectionBlockAfterPriorEmit(t *testing.T) {
 		t.Errorf("second chunk body missing id mirror: %q", secondSR.Body)
 	}
 }
+
+// TestSSEResponseInspectionOversizeFirstEvent verifies that an SSE
+// event exceeding --max-body-size, when no bytes have been emitted
+// yet, produces an ImmediateResponse 502.
+func TestSSEResponseInspectionOversizeFirstEvent(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	const maxSize = 64
+	server := NewServer(nil, nil, maxSize)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md}}
+
+	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`)
+	bigPayload := strings.Repeat("a", 200) // 200-byte data: payload, well over the 64-byte cap
+	streamBody := []byte("data: " + bigPayload + "\n\n")
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: reqBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{
+			Headers: &corev3.HeaderMap{Headers: []*corev3.HeaderValue{
+				{Key: ":status", Value: "200"},
+				{Key: "content-type", Value: "text/event-stream"},
+			}},
+		}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: streamBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	imm, ok := stream.sent[3].Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
+	if !ok {
+		t.Fatalf("response = %T, want *ProcessingResponse_ImmediateResponse", stream.sent[3].Response)
+	}
+	if imm.ImmediateResponse.Status.Code != 502 {
+		t.Errorf("status = %d, want 502", imm.ImmediateResponse.Status.Code)
+	}
+}
+
+// TestSSEResponseInspectionOversizeAfterPriorEmit verifies that an
+// oversized event after earlier events have been emitted produces an
+// SSE error event with EOS rather than an ImmediateResponse.
+func TestSSEResponseInspectionOversizeAfterPriorEmit(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	const maxSize = 64
+	server := NewServer(nil, nil, maxSize)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md}}
+
+	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`)
+	smallNotif := []byte("data: hi\n\n") // 10 bytes, fits in 64-byte cap
+	bigPayload := strings.Repeat("a", 200)
+	bigEvent := []byte("data: " + bigPayload + "\n\n")
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: reqBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{
+			Headers: &corev3.HeaderMap{Headers: []*corev3.HeaderValue{
+				{Key: ":status", Value: "200"},
+				{Key: "content-type", Value: "text/event-stream"},
+			}},
+		}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: smallNotif, EndOfStream: false}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: bigEvent, EndOfStream: true}}, MetadataContext: metadataCtx},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if len(stream.sent) != 5 {
+		t.Fatalf("sent %d responses, want 5", len(stream.sent))
+	}
+
+	// First body chunk: notification forwarded.
+	first := stream.sent[3].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	firstSR := first.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if !bytes.Equal(firstSR.Body, smallNotif) {
+		t.Errorf("first chunk body = %q, want %q", firstSR.Body, smallNotif)
+	}
+
+	// Second body chunk: error event with EOS=true.
+	second := stream.sent[4].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	secondSR := second.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if !secondSR.EndOfStream {
+		t.Error("second chunk EOS = false, want true")
+	}
+	if !bytes.Contains(secondSR.Body, []byte("response body too large")) {
+		t.Errorf("second chunk body missing oversize message: %q", secondSR.Body)
+	}
+}
