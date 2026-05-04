@@ -30,6 +30,7 @@ type Server struct {
 	protocolRegistry *protocol.Registry
 	staticConfig     *metadata.GuardrailConfig
 	logger           *slog.Logger
+	maxBodySize      int64
 }
 
 // streamState holds per-stream state for processing requests.
@@ -49,10 +50,11 @@ type streamState struct {
 	responsePathSet  bool
 }
 
-// NewServer creates a new ext_proc server. If staticConfig is non-nil, it is
-// used for every request and dynamic metadata/headers are ignored. Pass nil
-// to preserve the dynamic behavior. If logger is nil, slog.Default() is used.
-func NewServer(logger *slog.Logger, staticConfig *metadata.GuardrailConfig) *Server {
+// NewServer creates a new ext_proc server. maxBodySize caps the per-direction
+// buffer in bytes for streams that take the buffer-until-EOS inspection
+// path; bodies that exceed it are rejected with an ImmediateResponse. A
+// non-positive value disables the cap (intended for tests only).
+func NewServer(logger *slog.Logger, staticConfig *metadata.GuardrailConfig, maxBodySize int64) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -63,6 +65,7 @@ func NewServer(logger *slog.Logger, staticConfig *metadata.GuardrailConfig) *Ser
 		protocolRegistry: registry,
 		staticConfig:     staticConfig,
 		logger:           logger,
+		maxBodySize:      maxBodySize,
 	}
 }
 
@@ -321,6 +324,13 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 
 	// Path 2: buffer-until-EOS.
 	state.requestBuf = append(state.requestBuf, chunkBody...)
+	if s.maxBodySize > 0 && int64(len(state.requestBuf)) > s.maxBodySize {
+		s.logger.Info("blocking oversized request body",
+			slog.Int("size", len(state.requestBuf)),
+			slog.Int64("max", s.maxBodySize),
+		)
+		return s.createOversizeResponse(true, s.maxBodySize)
+	}
 	if !eos {
 		return streamedRequestBodyResponse(nil, false, nil)
 	}
@@ -522,6 +532,13 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 	}
 
 	state.responseBuf = append(state.responseBuf, chunkBody...)
+	if s.maxBodySize > 0 && int64(len(state.responseBuf)) > s.maxBodySize {
+		s.logger.Info("blocking oversized response body",
+			slog.Int("size", len(state.responseBuf)),
+			slog.Int64("max", s.maxBodySize),
+		)
+		return s.createOversizeResponse(false, s.maxBodySize)
+	}
 	if !eos {
 		return streamedResponseBodyResponse(nil, false, nil)
 	}
@@ -727,6 +744,28 @@ func (s *Server) createBlockResponse(reason string) *extprocv3.ProcessingRespons
 				},
 				Body:    bodyBytes,
 				Details: reason,
+			},
+		},
+	}
+}
+
+// createOversizeResponse builds an ImmediateResponse for bodies exceeding
+// the configured max-body-size. requestSide=true returns 413, false returns
+// 502 (so an unscanned response body never reaches the client).
+func (s *Server) createOversizeResponse(requestSide bool, maxBytes int64) *extprocv3.ProcessingResponse {
+	statusCode := typev3.StatusCode_BadGateway
+	direction := "response"
+	if requestSide {
+		statusCode = typev3.StatusCode_PayloadTooLarge
+		direction = "request"
+	}
+	body := fmt.Sprintf(`{"error":{"code":"GUARDRAIL_BODY_TOO_LARGE","message":"%s body exceeds guardrail max-body-size of %d bytes"}}`, direction, maxBytes)
+	return &extprocv3.ProcessingResponse{
+		Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+			ImmediateResponse: &extprocv3.ImmediateResponse{
+				Status:  &typev3.HttpStatus{Code: statusCode},
+				Body:    []byte(body),
+				Details: "body_too_large",
 			},
 		},
 	}

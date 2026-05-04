@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -47,7 +48,7 @@ func (m *mockProcessStream) Send(resp *extprocv3.ProcessingResponse) error {
 
 // TestPassthroughBehavior verifies that the server passes through all request types without modification.
 func TestPassthroughBehavior(t *testing.T) {
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	testCases := []struct {
 		name     string
@@ -165,7 +166,7 @@ func TestPassthroughBehavior(t *testing.T) {
 
 // TestProcessStreamError verifies error handling in the Process stream.
 func TestProcessStreamError(t *testing.T) {
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	t.Run("context_cancellation", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -219,7 +220,7 @@ func (m *mockFailingStream) Send(resp *extprocv3.ProcessingResponse) error {
 }
 
 func TestProcessSendError(t *testing.T) {
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	stream := &mockFailingStream{
 		ctx:       context.Background(),
@@ -414,7 +415,7 @@ func runGuardrailTestCase(t *testing.T, tc struct {
 	wantMasked   bool
 	wantOriginal bool
 }) {
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	// Create metadata context
 	var metadataCtx *corev3.Metadata
@@ -596,7 +597,7 @@ func TestStaticConfigShortCircuitsMetadata(t *testing.T) {
 		Modes:    []metadata.Mode{metadata.ModePreCall},
 		Presidio: &metadata.PresidioConfig{Endpoint: "http://static:8000"},
 	}
-	server := NewServer(nil, staticCfg)
+	server := NewServer(nil, staticCfg, 0)
 
 	// A MetadataContext that *would* configure a different provider if consulted.
 	md, err := structpb.NewStruct(map[string]interface{}{
@@ -646,7 +647,7 @@ func TestStaticConfigWorksWithoutMetadataOrHeaders(t *testing.T) {
 		Modes:    []metadata.Mode{metadata.ModePreCall},
 		Presidio: &metadata.PresidioConfig{Endpoint: "http://static:8000"},
 	}
-	server := NewServer(nil, staticCfg)
+	server := NewServer(nil, staticCfg, 0)
 	state := &streamState{requestMetadata: make(map[string]interface{})}
 	req := &extprocv3.ProcessingRequest{
 		Request: &extprocv3.ProcessingRequest_RequestHeaders{
@@ -665,7 +666,7 @@ func TestStaticConfigWorksWithoutMetadataOrHeaders(t *testing.T) {
 // must still fall back to the x-guardrail-* headers injected by the Lua filter.
 func TestHeadersFallbackWhenMetadataPresentButEmpty(t *testing.T) {
 	const testProvider = "presidio-api"
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	emptyMD, err := structpb.NewStruct(map[string]interface{}{})
 	if err != nil {
@@ -707,7 +708,7 @@ func TestHeadersFallbackWhenMetadataPresentButEmpty(t *testing.T) {
 // guardrail configuration from x-guardrail-* HTTP request headers.
 func TestHeaderFallbackConfig(t *testing.T) {
 	const testProvider = "presidio-api"
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	testCases := []struct {
 		name       string
@@ -862,7 +863,7 @@ func TestEmptyRequestBodySkipsParserSelection(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	md, err := structpb.NewStruct(map[string]interface{}{
 		"guardrail.provider":                  "presidio-api",
@@ -933,7 +934,7 @@ func TestEmptyResponseBodyPassesThrough(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	md, err := structpb.NewStruct(map[string]interface{}{
 		"guardrail.provider":                  "presidio-api",
@@ -993,7 +994,7 @@ func TestPostCallOnlyParserSharedFromRequest(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	md, err := structpb.NewStruct(map[string]interface{}{
 		"guardrail.provider":                  "presidio-api",
@@ -1075,7 +1076,7 @@ func TestHeaderFallbackInRequestFlow(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	// Create request headers with guardrail config
 	headerValues := []*corev3.HeaderValue{
@@ -1209,7 +1210,7 @@ func TestRequestBodyBufferedUntilEOSMasks(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	md, err := structpb.NewStruct(map[string]interface{}{
 		"guardrail.provider":                  "presidio-api",
@@ -1278,7 +1279,7 @@ func TestRequestBodyBufferedUntilEOSMasks(t *testing.T) {
 // configured, multi-chunk request bodies are echoed chunk-by-chunk with no
 // buffering.
 func TestRequestBodyMultiChunkPassthroughEchoes(t *testing.T) {
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	chunk1 := []byte(`{"jsonrpc":"2.0",`)
 	chunk2 := []byte(`"id":1,"method":"ping"}`)
@@ -1313,7 +1314,7 @@ func TestResponseBodyBufferedUntilEOSMasks(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	md, err := structpb.NewStruct(map[string]interface{}{
 		"guardrail.provider":                  "presidio-api",
@@ -1375,7 +1376,7 @@ func TestResponseBodyBufferedUntilEOSMasks(t *testing.T) {
 // TestResponseBodyMultiChunkPassthroughEchoes verifies that without
 // inspection configured, response chunks are echoed without buffering.
 func TestResponseBodyMultiChunkPassthroughEchoes(t *testing.T) {
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	chunk1 := []byte(`{"jsonrpc":"2.0",`)
 	chunk2 := []byte(`"id":1,"result":"ok"}`)
@@ -1412,7 +1413,7 @@ func TestSSEResponseFailsClosedWhenInspecting(t *testing.T) {
 	presidioServer := createMockPresidioServer(t)
 	defer presidioServer.Close()
 
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	md, err := structpb.NewStruct(map[string]interface{}{
 		"guardrail.provider":                  "presidio-api",
@@ -1469,7 +1470,7 @@ func TestSSEResponseFailsClosedWhenInspecting(t *testing.T) {
 // post_call inspection configured, a text/event-stream response is echoed
 // chunk-by-chunk and no ImmediateResponse is emitted.
 func TestSSEResponsePassesThroughWhenNotInspecting(t *testing.T) {
-	server := NewServer(nil, nil)
+	server := NewServer(nil, nil, 0)
 
 	chunk := []byte("event: message\ndata: hello\n\n")
 
@@ -1498,5 +1499,130 @@ func TestSSEResponsePassesThroughWhenNotInspecting(t *testing.T) {
 	sr := bodyResp.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
 	if string(sr.Body) != string(chunk) || !sr.EndOfStream {
 		t.Errorf("chunk reply: body=%q EOS=%v, want %q EOS=true", sr.Body, sr.EndOfStream, chunk)
+	}
+}
+
+// TestRequestBodyOversizeFailsClosed verifies that a request body exceeding
+// max-body-size in the inspection path is rejected with 413.
+func TestRequestBodyOversizeFailsClosed(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	const maxSize = 64
+	server := NewServer(nil, nil, maxSize)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "pre_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md}}
+
+	// 200 bytes of valid-looking JSON-RPC well over the 64-byte cap.
+	full := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"text":"` + strings.Repeat("a", 100) + `"}}}`
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: []byte(full), EndOfStream: true}}, MetadataContext: metadataCtx},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if len(stream.sent) != 2 {
+		t.Fatalf("sent %d responses, want 2", len(stream.sent))
+	}
+
+	imm, ok := stream.sent[1].Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
+	if !ok {
+		t.Fatalf("response = %T, want *ProcessingResponse_ImmediateResponse", stream.sent[1].Response)
+	}
+	if imm.ImmediateResponse.Status.Code != 413 {
+		t.Errorf("status = %d, want 413", imm.ImmediateResponse.Status.Code)
+	}
+}
+
+// TestRequestBodyOversizePassthroughUnaffected verifies the cap does not
+// apply to the pass-through path (no inspection configured).
+func TestRequestBodyOversizePassthroughUnaffected(t *testing.T) {
+	const maxSize = 64
+	server := NewServer(nil, nil, maxSize)
+
+	full := strings.Repeat("a", 200)
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: []byte(full), EndOfStream: true}}},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if _, ok := stream.sent[1].Response.(*extprocv3.ProcessingResponse_ImmediateResponse); ok {
+		t.Fatal("got ImmediateResponse on pass-through path; expected echo")
+	}
+	rb, ok := stream.sent[1].Response.(*extprocv3.ProcessingResponse_RequestBody)
+	if !ok {
+		t.Fatalf("response = %T, want *ProcessingResponse_RequestBody", stream.sent[1].Response)
+	}
+	sr := rb.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if string(sr.Body) != full || !sr.EndOfStream {
+		t.Errorf("pass-through reply: body=%q EOS=%v, want %q EOS=true", sr.Body, sr.EndOfStream, full)
+	}
+}
+
+// TestResponseBodyOversizeFailsClosed verifies a 502 reply when the
+// response body exceeds max-body-size in the inspection path.
+func TestResponseBodyOversizeFailsClosed(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	const maxSize = 64
+	server := NewServer(nil, nil, maxSize)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md}}
+
+	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`)
+	respBody := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"` + strings.Repeat("a", 100) + `"}]}}`
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: reqBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: []byte(respBody), EndOfStream: true}}, MetadataContext: metadataCtx},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if len(stream.sent) != 4 {
+		t.Fatalf("sent %d responses, want 4", len(stream.sent))
+	}
+	imm, ok := stream.sent[3].Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
+	if !ok {
+		t.Fatalf("response = %T, want *ProcessingResponse_ImmediateResponse", stream.sent[3].Response)
+	}
+	if imm.ImmediateResponse.Status.Code != 502 {
+		t.Errorf("status = %d, want 502", imm.ImmediateResponse.Status.Code)
 	}
 }
