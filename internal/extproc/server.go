@@ -195,19 +195,53 @@ func (s *Server) handleRequestHeaders(req *extprocv3.ProcessingRequest, state *s
 	}
 }
 
-// handleResponseHeaders inspects the upstream response status. Non-2xx
-// responses (typically plain-text or HTML error pages) cannot be parsed as
-// JSON-RPC, so we mark the stream to skip body inspection and avoid noisy
-// parse errors on the response body.
+// handleResponseHeaders inspects the upstream response. Two decisions:
+//  1. Non-2xx responses are typically plain-text/HTML, not JSON-RPC; skip
+//     response-body inspection (today's skip_non_2xx workaround).
+//  2. text/event-stream responses cannot be inspected as whole documents;
+//     if response inspection is configured, fail closed with 501. If not,
+//     let the body pass through chunk-by-chunk via handleResponseBody.
 func (s *Server) handleResponseHeaders(hdrs *extprocv3.HttpHeaders, state *streamState) *extprocv3.ProcessingResponse {
 	if status, ok := readStatus(hdrs); ok && (status < 200 || status >= 300) {
 		state.skipResponseBody = true
 	}
+
+	if isSSE(hdrs) && state.config != nil && s.modeEnabled(state.config, metadata.ModePostCall) && state.parser != nil && !state.skipResponseBody {
+		s.logger.Info("blocking SSE response (guardrail cannot inspect text/event-stream)")
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+				ImmediateResponse: &extprocv3.ImmediateResponse{
+					Status:  &typev3.HttpStatus{Code: typev3.StatusCode_NotImplemented},
+					Body:    []byte(`{"error":{"code":"GUARDRAIL_UNSUPPORTED","message":"guardrail adapter cannot inspect text/event-stream responses"}}`),
+					Details: "sse_response_unsupported",
+				},
+			},
+		}
+	}
+
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &extprocv3.HeadersResponse{},
 		},
 	}
+}
+
+// isSSE reports whether the response carries a text/event-stream content type.
+func isSSE(hdrs *extprocv3.HttpHeaders) bool {
+	if hdrs.GetHeaders() == nil {
+		return false
+	}
+	for _, h := range hdrs.GetHeaders().GetHeaders() {
+		if !strings.EqualFold(h.Key, "content-type") {
+			continue
+		}
+		val := h.Value
+		if len(h.RawValue) > 0 {
+			val = string(h.RawValue)
+		}
+		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(val)), "text/event-stream")
+	}
+	return false
 }
 
 // readStatus extracts the HTTP :status pseudo-header as an int.
