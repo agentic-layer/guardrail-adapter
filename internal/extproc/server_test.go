@@ -1943,3 +1943,58 @@ func TestSSEResponseInspectionOversizeAfterPriorEmit(t *testing.T) {
 		t.Errorf("second chunk body missing oversize message: %q", secondSR.Body)
 	}
 }
+
+// TestSSEResponsePassesThroughWhenNoParserSniffed verifies that a
+// post_call configuration plus a non-MCP request body (parser sniffing
+// returns nil) results in SSE pass-through, not frame-aware inspection.
+func TestSSEResponsePassesThroughWhenNoParserSniffed(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	server := NewServer(nil, nil, 0)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md}}
+
+	// Plain text body — won't sniff to MCPParser.
+	reqBody := []byte("hello world")
+	chunk := []byte("event: message\ndata: hello\n\n")
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: reqBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{
+			Headers: &corev3.HeaderMap{Headers: []*corev3.HeaderValue{
+				{Key: ":status", Value: "200"},
+				{Key: "content-type", Value: "text/event-stream"},
+			}},
+		}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: chunk, EndOfStream: true}}, MetadataContext: metadataCtx},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	for i, sent := range stream.sent {
+		if _, ok := sent.Response.(*extprocv3.ProcessingResponse_ImmediateResponse); ok {
+			t.Fatalf("sent[%d] is ImmediateResponse, want passthrough", i)
+		}
+	}
+	bodyResp := stream.sent[3].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	sr := bodyResp.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if !bytes.Equal(sr.Body, chunk) {
+		t.Errorf("body = %q, want %q (verbatim)", sr.Body, chunk)
+	}
+}
