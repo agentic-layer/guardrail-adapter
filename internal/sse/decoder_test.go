@@ -178,3 +178,67 @@ func TestDecoderBlankLinesBetweenEventsAreNoOps(t *testing.T) {
 		t.Errorf("Data = %q, want %q", events[0].Data, "hi")
 	}
 }
+
+func TestDecoderFlushTrailingEventWithoutBlankLine(t *testing.T) {
+	d := NewDecoder(0)
+	if _, err := d.Write([]byte("data: tail\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	ev, err := d.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if ev == nil {
+		t.Fatal("Flush returned nil, want event")
+	}
+	if !bytes.Equal(ev.Data, []byte("tail")) {
+		t.Errorf("Data = %q, want %q", ev.Data, "tail")
+	}
+	if !bytes.Equal(ev.Raw, []byte("data: tail\n")) {
+		t.Errorf("Raw = %q, want %q", ev.Raw, "data: tail\n")
+	}
+}
+
+func TestDecoderFlushEmptyBufferReturnsNil(t *testing.T) {
+	d := NewDecoder(0)
+	ev, err := d.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if ev != nil {
+		t.Errorf("Flush() = %+v, want nil", ev)
+	}
+}
+
+func TestDecoderFlushAfterDispatchedEventReturnsNil(t *testing.T) {
+	d := NewDecoder(0)
+	if _, err := d.Write([]byte("data: x\n\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	ev, err := d.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if ev != nil {
+		t.Errorf("Flush() = %+v, want nil", ev)
+	}
+}
+
+func TestDecoderFlushPartialUnterminatedLine(t *testing.T) {
+	// Trailing line without a terminator. Flush should treat it as a
+	// final line and emit the event.
+	d := NewDecoder(0)
+	if _, err := d.Write([]byte("event: foo\ndata: bar")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	ev, err := d.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if ev == nil {
+		t.Fatal("Flush returned nil")
+	}
+	if ev.Name != "foo" || !bytes.Equal(ev.Data, []byte("bar")) {
+		t.Errorf("ev = %+v, want Name=foo Data=bar", ev)
+	}
+}
