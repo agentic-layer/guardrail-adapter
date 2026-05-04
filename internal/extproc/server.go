@@ -39,6 +39,11 @@ type streamState struct {
 	parserAttempted  bool
 	skipResponseBody bool
 	requestMetadata  map[string]interface{}
+
+	// streaming
+	requestBuf      []byte
+	requestBuffered bool // path decided: true = buffer-until-EOS, false = pass-through
+	requestPathSet  bool // whether path has been decided yet for the request side
 }
 
 // NewServer creates a new ext_proc server. If staticConfig is non-nil, it is
@@ -225,161 +230,171 @@ func readStatus(hdrs *extprocv3.HttpHeaders) (int, bool) {
 }
 
 // handleRequestBody processes the request body with guardrail inspection.
+// In streamed mode, the function decides one of two paths on the first chunk:
+//   - pass-through: echo each chunk as a StreamedResponse, no buffering.
+//   - buffer-until-EOS: hold replies (body=nil) while accumulating, then run
+//     parser+provider over the assembled buffer at EndOfStream and emit the
+//     final reply with the assembled or mutated body.
+//
+// The path decision is recorded on streamState and stable for the rest of
+// the request body chunks.
 func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody, state *streamState) *extprocv3.ProcessingResponse {
-	// Empty bodies (e.g. trailing chunks, GETs) carry no protocol signal.
-	if len(body.Body) == 0 {
-		s.logger.Debug("request body passthrough", "reason", "empty_body")
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_RequestBody{
-				RequestBody: &extprocv3.BodyResponse{},
-			},
-		}
+	chunkBody := body.GetBody()
+	eos := body.GetEndOfStream()
+
+	// Sniff a parser on the first non-empty chunk, regardless of mode.
+	// SelectParser delegates to each parser's CanParse, which (today, for
+	// MCP) requires complete JSON — partial chunks fail. To avoid locking a
+	// stream into pass-through on a truncated first chunk, sniffParser
+	// leaves parserAttempted=false on a NoParserMatchError against a
+	// non-EOS chunk; the assembled buffer at EOS then gets a re-sniff.
+	// The result feeds path selection here AND on the response side
+	// (post_call-only configurations rely on this — see
+	// docs/superpowers/specs/2026-04-30-shared-protocol-parser-design.md).
+	if !state.parserAttempted && !state.requestPathSet && len(chunkBody) > 0 {
+		s.sniffParser(ctx, chunkBody, state, eos)
 	}
 
-	// Identify the protocol from the first non-empty request body. The result
-	// (which may be nil) is shared with the response handler via streamState.
-	if !state.parserAttempted {
-		parser, err := s.protocolRegistry.SelectParser(ctx, body.Body, nil)
-		state.parser = parser
-		state.parserAttempted = true
-		if err != nil {
-			var nm *protocol.NoParserMatchError
-			if errors.As(err, &nm) {
-				s.logger.Warn("no protocol parser matched request body",
-					slog.Int("body_size", nm.BodySize),
-					slog.String("prefix", nm.Prefix),
-					slog.Any("reasons", nm.Reasons),
-				)
-			} else {
-				s.logger.Warn("protocol parser selection failed", "error", err)
+	// Decide the path on the first body event. If pre_call is configured
+	// but the parser is still undecided (sniff inconclusive on a partial
+	// chunk), keep tentatively buffering — we will re-sniff against the
+	// assembled buffer at EOS.
+	if !state.requestPathSet {
+		preCallWanted := state.config != nil && s.modeEnabled(state.config, metadata.ModePreCall)
+		state.requestBuffered = preCallWanted && (state.parser != nil || !state.parserAttempted)
+		state.requestPathSet = true
+		if !state.requestBuffered {
+			var reason string
+			switch {
+			case state.config == nil:
+				reason = "no_config"
+			case !s.modeEnabled(state.config, metadata.ModePreCall):
+				reason = "mode_disabled"
+			case state.parser == nil:
+				reason = "no_parser"
 			}
-		} else if parser != nil {
-			s.logger.Debug("protocol parser selected",
-				slog.String("parser", fmt.Sprintf("%T", parser)),
-			)
+			s.logger.Debug("request body passthrough", "reason", reason)
 		}
 	}
 
-	// If pre_call inspection isn't requested, pass through without inspecting.
-	if state.config == nil || !s.modeEnabled(state.config, metadata.ModePreCall) {
-		reason := "mode_disabled"
-		if state.config == nil {
-			reason = "no_config"
-		}
-		s.logger.Debug("request body passthrough", "reason", reason)
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_RequestBody{
-				RequestBody: &extprocv3.BodyResponse{},
-			},
-		}
+	// Path 1: pass-through. Echo each chunk verbatim.
+	if !state.requestBuffered {
+		return streamedRequestBodyResponse(chunkBody, eos, nil)
 	}
 
-	// No parser available, passthrough (parser-selection error already logged).
+	// Path 2: buffer-until-EOS.
+	state.requestBuf = append(state.requestBuf, chunkBody...)
+	if !eos {
+		return streamedRequestBodyResponse(nil, false, nil)
+	}
+
+	// EOS: if no parser has been identified yet, re-sniff against the
+	// fully-assembled buffer (the partial-chunk sniff may have failed).
+	// Skip the re-sniff for an empty buffer — there's nothing to inspect.
+	if state.parser == nil && len(state.requestBuf) > 0 {
+		s.sniffParser(ctx, state.requestBuf, state, true)
+	}
 	if state.parser == nil {
 		s.logger.Debug("request body passthrough", "reason", "no_parser")
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_RequestBody{
-				RequestBody: &extprocv3.BodyResponse{},
-			},
-		}
+		return streamedRequestBodyResponse(state.requestBuf, true, nil)
 	}
 
-	// Parse request and extract texts
-	texts, shouldInspect, err := state.parser.ParseRequest(ctx, body.Body)
+	// EOS: run parser+provider over the assembled buffer.
+	return s.inspectAndEmitRequest(ctx, state)
+}
+
+// sniffParser attempts to identify a protocol parser for the given body bytes.
+// On a NoParserMatchError encountered against a non-EOS chunk, the parser
+// attempt is NOT marked as final — a later chunk (or the assembled buffer at
+// EOS) can re-attempt. Any other outcome (match, non-match-on-EOS, or a
+// non-NoParserMatchError) is final and locks state.parserAttempted=true.
+func (s *Server) sniffParser(ctx context.Context, bodyBytes []byte, state *streamState, eos bool) {
+	parser, err := s.protocolRegistry.SelectParser(ctx, bodyBytes, nil)
+	if err != nil {
+		var nm *protocol.NoParserMatchError
+		if errors.As(err, &nm) {
+			// On a partial chunk, defer the decision — there may be more bytes.
+			if !eos {
+				return
+			}
+			s.logger.Warn("no protocol parser matched request body",
+				slog.Int("body_size", nm.BodySize),
+				slog.String("prefix", nm.Prefix),
+				slog.Any("reasons", nm.Reasons),
+			)
+		} else {
+			s.logger.Warn("protocol parser selection failed", "error", err)
+		}
+		state.parser = nil
+		state.parserAttempted = true
+		return
+	}
+	state.parser = parser
+	state.parserAttempted = true
+	if parser != nil {
+		s.logger.Debug("protocol parser selected",
+			slog.String("parser", fmt.Sprintf("%T", parser)),
+		)
+	}
+}
+
+// inspectAndEmitRequest runs request-side inspection on state.requestBuf and
+// emits the final EOS=true reply. Always returns a response — never nil.
+func (s *Server) inspectAndEmitRequest(ctx context.Context, state *streamState) *extprocv3.ProcessingResponse {
+	body := state.requestBuf
+
+	texts, shouldInspect, err := state.parser.ParseRequest(ctx, body)
 	if err != nil {
 		s.logger.Warn("failed to parse request body", "error", err)
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_RequestBody{
-				RequestBody: &extprocv3.BodyResponse{},
-			},
-		}
+		return streamedRequestBodyResponse(body, true, nil)
 	}
-
 	s.logger.Debug("texts extracted from request", "count", len(texts))
-	// If not inspectable or no texts to inspect, passthrough
+
 	if !shouldInspect || len(texts) == 0 {
 		reason := "no_texts"
 		if !shouldInspect {
 			reason = "not_inspectable"
 		}
 		s.logger.Debug("request body passthrough", "reason", reason)
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_RequestBody{
-				RequestBody: &extprocv3.BodyResponse{},
-			},
-		}
+		return streamedRequestBodyResponse(body, true, nil)
 	}
 
-	// Create provider instance
 	prov, err := s.createProvider(state.config)
 	if err != nil {
 		s.logger.Warn("failed to create provider", "error", err)
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_RequestBody{
-				RequestBody: &extprocv3.BodyResponse{},
-			},
-		}
+		return streamedRequestBodyResponse(body, true, nil)
 	}
 
-	// Process each text with the provider
 	replacements := make(map[string]string)
 	for _, text := range texts {
 		result, err := prov.ProcessRequest(ctx, text.Value)
 		if err != nil {
-			// BLOCK action - return ImmediateResponse with 403
 			return s.createBlockResponse(err.Error())
 		}
-
-		// If text was modified, store replacement
 		if result.Text != text.Value {
 			replacements[text.Path] = result.Text
-			// Store metadata for response processing
 			if result.ResponseMetadata != nil {
 				state.requestMetadata[text.Path] = result.ResponseMetadata
 			}
 		}
 	}
 
-	// If there are replacements, apply MASK action
-	if len(replacements) > 0 {
-		modifiedBody, err := state.parser.ReplaceTexts(ctx, body.Body, replacements)
-		if err != nil {
-			s.logger.Warn("failed to replace texts in request body", "error", err)
-			return &extprocv3.ProcessingResponse{
-				Response: &extprocv3.ProcessingResponse_RequestBody{
-					RequestBody: &extprocv3.BodyResponse{},
-				},
-			}
-		}
-		s.logger.Info("masked request body",
-			slog.Int("replacements", len(replacements)),
-			slog.Int("before_size", len(body.Body)),
-			slog.Int("after_size", len(modifiedBody)),
-		)
-
-		return &extprocv3.ProcessingResponse{
-			Response: &extprocv3.ProcessingResponse_RequestBody{
-				RequestBody: &extprocv3.BodyResponse{
-					Response: &extprocv3.CommonResponse{
-						HeaderMutation: contentLengthMutation(),
-						BodyMutation: &extprocv3.BodyMutation{
-							Mutation: &extprocv3.BodyMutation_Body{
-								Body: modifiedBody,
-							},
-						},
-					},
-				},
-			},
-		}
+	if len(replacements) == 0 {
+		s.logger.Debug("request body passthrough", "reason", "no_replacements")
+		return streamedRequestBodyResponse(body, true, nil)
 	}
 
-	// ALLOW action - passthrough
-	s.logger.Debug("request body passthrough", "reason", "no_replacements")
-	return &extprocv3.ProcessingResponse{
-		Response: &extprocv3.ProcessingResponse_RequestBody{
-			RequestBody: &extprocv3.BodyResponse{},
-		},
+	modifiedBody, err := state.parser.ReplaceTexts(ctx, body, replacements)
+	if err != nil {
+		s.logger.Warn("failed to replace texts in request body", "error", err)
+		return streamedRequestBodyResponse(body, true, nil)
 	}
+	s.logger.Info("masked request body",
+		slog.Int("replacements", len(replacements)),
+		slog.Int("before_size", len(body)),
+		slog.Int("after_size", len(modifiedBody)),
+	)
+	return streamedRequestBodyResponse(modifiedBody, true, contentLengthMutation())
 }
 
 // contentLengthMutation returns a HeaderMutation that removes the content-length

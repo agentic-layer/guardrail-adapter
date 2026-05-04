@@ -443,7 +443,8 @@ func runGuardrailTestCase(t *testing.T, tc struct {
 		{
 			Request: &extprocv3.ProcessingRequest_RequestBody{
 				RequestBody: &extprocv3.HttpBody{
-					Body: []byte(tc.requestBody),
+					Body:        []byte(tc.requestBody),
+					EndOfStream: true,
 				},
 			},
 			MetadataContext: metadataCtx,
@@ -473,7 +474,7 @@ func runGuardrailTestCase(t *testing.T, tc struct {
 	} else if tc.wantMasked {
 		verifyMaskedResponse(t, bodyResp, tc.requestBody)
 	} else if tc.wantOriginal {
-		verifyPassthroughResponse(t, bodyResp)
+		verifyPassthroughResponse(t, bodyResp, tc.requestBody)
 	}
 }
 
@@ -500,40 +501,57 @@ func verifyBlockedResponse(t *testing.T, bodyResp *extprocv3.ProcessingResponse)
 	}
 }
 
-// verifyMaskedResponse verifies that the response contains a BodyMutation.
+// verifyMaskedResponse verifies the EOS reply carries a StreamedResponse with
+// a body that differs from the original.
 func verifyMaskedResponse(t *testing.T, bodyResp *extprocv3.ProcessingResponse, originalBody string) {
-	bodyRespTyped, ok := bodyResp.Response.(*extprocv3.ProcessingResponse_RequestBody)
+	rb, ok := bodyResp.Response.(*extprocv3.ProcessingResponse_RequestBody)
 	if !ok {
-		t.Errorf("expected RequestBody response, got %T", bodyResp.Response)
+		t.Errorf("response = %T, want *ProcessingResponse_RequestBody", bodyResp.Response)
 		return
 	}
-
-	if bodyRespTyped.RequestBody.Response == nil || bodyRespTyped.RequestBody.Response.BodyMutation == nil {
+	if rb.RequestBody.Response == nil || rb.RequestBody.Response.BodyMutation == nil {
 		t.Error("expected BodyMutation in response")
 		return
 	}
-
-	mutatedBody := bodyRespTyped.RequestBody.Response.BodyMutation.GetBody()
-	if len(mutatedBody) == 0 {
+	sr, ok := rb.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse)
+	if !ok {
+		t.Errorf("mutation = %T, want *BodyMutation_StreamedResponse", rb.RequestBody.Response.BodyMutation.Mutation)
+		return
+	}
+	if !sr.StreamedResponse.EndOfStream {
+		t.Error("EndOfStream = false, want true on the masked reply")
+	}
+	if len(sr.StreamedResponse.Body) == 0 {
 		t.Error("expected non-empty mutated body")
 	}
-
-	// Verify the body is different from original
-	if string(mutatedBody) == originalBody {
-		t.Error("expected mutated body to be different from original")
+	if string(sr.StreamedResponse.Body) == originalBody {
+		t.Error("expected mutated body to differ from original")
 	}
 }
 
-// verifyPassthroughResponse verifies that the response is a passthrough (no mutation).
-func verifyPassthroughResponse(t *testing.T, bodyResp *extprocv3.ProcessingResponse) {
-	bodyRespTyped, ok := bodyResp.Response.(*extprocv3.ProcessingResponse_RequestBody)
+// verifyPassthroughResponse verifies the EOS reply carries a StreamedResponse
+// whose body equals the original (pass-through path) or a held empty reply
+// (buffer-until-EOS path with no replacements).
+func verifyPassthroughResponse(t *testing.T, bodyResp *extprocv3.ProcessingResponse, originalBody string) {
+	rb, ok := bodyResp.Response.(*extprocv3.ProcessingResponse_RequestBody)
 	if !ok {
-		t.Errorf("expected RequestBody response, got %T", bodyResp.Response)
+		t.Errorf("response = %T, want *ProcessingResponse_RequestBody", bodyResp.Response)
 		return
 	}
-
-	if bodyRespTyped.RequestBody.Response != nil && bodyRespTyped.RequestBody.Response.BodyMutation != nil {
-		t.Error("expected passthrough (no BodyMutation), but got mutation")
+	if rb.RequestBody.Response == nil || rb.RequestBody.Response.BodyMutation == nil {
+		t.Error("expected StreamedResponse mutation in passthrough reply")
+		return
+	}
+	sr, ok := rb.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse)
+	if !ok {
+		t.Errorf("mutation = %T, want *BodyMutation_StreamedResponse", rb.RequestBody.Response.BodyMutation.Mutation)
+		return
+	}
+	if string(sr.StreamedResponse.Body) != originalBody {
+		t.Errorf("passthrough body = %q, want %q", sr.StreamedResponse.Body, originalBody)
+	}
+	if !sr.StreamedResponse.EndOfStream {
+		t.Error("EndOfStream = false, want true")
 	}
 }
 
@@ -867,12 +885,13 @@ func TestEmptyRequestBodySkipsParserSelection(t *testing.T) {
 			MetadataContext: metadataCtx,
 		},
 		{
-			Request:         &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: nil}},
+			Request:         &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: nil, EndOfStream: true}},
 			MetadataContext: metadataCtx,
 		},
 		{
 			Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{
-				Body: []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"john@example.com"}]}}`),
+				Body:        []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"john@example.com"}]}}`),
+				EndOfStream: true,
 			}},
 			MetadataContext: metadataCtx,
 		},
@@ -891,8 +910,9 @@ func TestEmptyRequestBodySkipsParserSelection(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected RequestBody response, got %T", stream.sent[1].Response)
 	}
-	if reqBody.RequestBody.Response != nil && reqBody.RequestBody.Response.BodyMutation != nil {
-		t.Error("empty request body should be passthrough, but got BodyMutation")
+	sr := reqBody.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if len(sr.Body) != 0 || !sr.EndOfStream {
+		t.Errorf("empty request body passthrough: body=%q EOS=%v, want empty + EOS=true", sr.Body, sr.EndOfStream)
 	}
 
 	respBody, ok := stream.sent[2].Response.(*extprocv3.ProcessingResponse_ResponseBody)
@@ -935,12 +955,13 @@ func TestEmptyResponseBodyPassesThrough(t *testing.T) {
 		},
 		{
 			Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{
-				Body: []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`),
+				Body:        []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"q":"hi"}}}`),
+				EndOfStream: true,
 			}},
 			MetadataContext: metadataCtx,
 		},
 		{
-			Request:         &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: nil}},
+			Request:         &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: nil, EndOfStream: true}},
 			MetadataContext: metadataCtx,
 		},
 	}
@@ -995,11 +1016,11 @@ func TestPostCallOnlyParserSharedFromRequest(t *testing.T) {
 			MetadataContext: metadataCtx,
 		},
 		{
-			Request:         &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: requestBody}},
+			Request:         &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: requestBody, EndOfStream: true}},
 			MetadataContext: metadataCtx,
 		},
 		{
-			Request:         &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: responseBody}},
+			Request:         &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: responseBody, EndOfStream: true}},
 			MetadataContext: metadataCtx,
 		},
 	}
@@ -1018,8 +1039,9 @@ func TestPostCallOnlyParserSharedFromRequest(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected RequestBody response, got %T", stream.sent[1].Response)
 	}
-	if reqBody.RequestBody.Response != nil && reqBody.RequestBody.Response.BodyMutation != nil {
-		t.Error("request body should be passthrough when only post_call is enabled, but got BodyMutation")
+	sr := reqBody.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if string(sr.Body) != string(requestBody) || !sr.EndOfStream {
+		t.Errorf("request body passthrough: body=%q EOS=%v, want %q EOS=true", sr.Body, sr.EndOfStream, requestBody)
 	}
 
 	// Response body should be MASKED — proves the parser was identified from
@@ -1074,7 +1096,8 @@ func TestHeaderFallbackInRequestFlow(t *testing.T) {
 		{
 			Request: &extprocv3.ProcessingRequest_RequestBody{
 				RequestBody: &extprocv3.HttpBody{
-					Body: []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test","arguments":{"email":"john@example.com"}}}`),
+					Body:        []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test","arguments":{"email":"john@example.com"}}}`),
+					EndOfStream: true,
 				},
 			},
 			MetadataContext: nil,
@@ -1124,9 +1147,16 @@ func TestHeaderFallbackInRequestFlow(t *testing.T) {
 	}
 
 	// Verify body was actually modified
-	mutatedBody := bodyResp.RequestBody.Response.BodyMutation.GetBody()
+	sr, ok := bodyResp.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse)
+	if !ok {
+		t.Fatalf("mutation = %T, want *BodyMutation_StreamedResponse", bodyResp.RequestBody.Response.BodyMutation.Mutation)
+	}
+	mutatedBody := sr.StreamedResponse.Body
 	if string(mutatedBody) == string(requests[1].GetRequestBody().Body) {
 		t.Error("expected body to be mutated, but it matches original")
+	}
+	if !sr.StreamedResponse.EndOfStream {
+		t.Error("EndOfStream = false, want true on EOS reply")
 	}
 }
 
@@ -1163,5 +1193,110 @@ func TestStreamedResponseBodyResponseShape(t *testing.T) {
 	}
 	if mut.StreamedResponse.EndOfStream {
 		t.Error("EndOfStream = true, want false")
+	}
+}
+
+// TestRequestBodyBufferedUntilEOSMasks verifies that when an MCP request body
+// arrives in multiple streamed chunks, the adapter holds replies until
+// EndOfStream and emits the assembled+mutated body on the EOS chunk.
+func TestRequestBodyBufferedUntilEOSMasks(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	server := NewServer(nil, nil)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "pre_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{
+		FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md},
+	}
+
+	full := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{"email":"john@example.com"}}}`
+	chunk1 := []byte(full[:40])
+	chunk2 := []byte(full[40:])
+
+	requests := []*extprocv3.ProcessingRequest{
+		{
+			Request:         &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}},
+			MetadataContext: metadataCtx,
+		},
+		{
+			Request:         &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: chunk1, EndOfStream: false}},
+			MetadataContext: metadataCtx,
+		},
+		{
+			Request:         &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: chunk2, EndOfStream: true}},
+			MetadataContext: metadataCtx,
+		},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if len(stream.sent) != 3 {
+		t.Fatalf("sent %d responses, want 3", len(stream.sent))
+	}
+
+	// First body chunk: held — body=nil, EOS=false.
+	first := stream.sent[1].Response.(*extprocv3.ProcessingResponse_RequestBody)
+	firstSR := first.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if len(firstSR.Body) != 0 || firstSR.EndOfStream {
+		t.Errorf("intermediate reply: body=%q EOS=%v, want empty body and EOS=false", firstSR.Body, firstSR.EndOfStream)
+	}
+
+	// EOS chunk: assembled + mutated body, EOS=true.
+	last := stream.sent[2].Response.(*extprocv3.ProcessingResponse_RequestBody)
+	lastSR := last.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if !lastSR.EndOfStream {
+		t.Error("EOS reply: EndOfStream = false, want true")
+	}
+	if len(lastSR.Body) == 0 {
+		t.Fatal("EOS reply: body is empty, want assembled+mutated body")
+	}
+	if string(lastSR.Body) == full {
+		t.Error("EOS reply: body matches original; expected masked")
+	}
+}
+
+// TestRequestBodyMultiChunkPassthroughEchoes verifies that without a guardrail
+// configured, multi-chunk request bodies are echoed chunk-by-chunk with no
+// buffering.
+func TestRequestBodyMultiChunkPassthroughEchoes(t *testing.T) {
+	server := NewServer(nil, nil)
+
+	chunk1 := []byte(`{"jsonrpc":"2.0",`)
+	chunk2 := []byte(`"id":1,"method":"ping"}`)
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: chunk1, EndOfStream: false}}},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: chunk2, EndOfStream: true}}},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	first := stream.sent[1].Response.(*extprocv3.ProcessingResponse_RequestBody)
+	firstSR := first.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if string(firstSR.Body) != string(chunk1) || firstSR.EndOfStream {
+		t.Errorf("chunk 1 reply: body=%q EOS=%v, want %q EOS=false", firstSR.Body, firstSR.EndOfStream, chunk1)
+	}
+
+	last := stream.sent[2].Response.(*extprocv3.ProcessingResponse_RequestBody)
+	lastSR := last.RequestBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if string(lastSR.Body) != string(chunk2) || !lastSR.EndOfStream {
+		t.Errorf("chunk 2 reply: body=%q EOS=%v, want %q EOS=true", lastSR.Body, lastSR.EndOfStream, chunk2)
 	}
 }
