@@ -1628,3 +1628,70 @@ func TestResponseBodyOversizeFailsClosed(t *testing.T) {
 		t.Errorf("status = %d, want 502", imm.ImmediateResponse.Status.Code)
 	}
 }
+
+// TestSSEResponseInspectionMasksToolCallResultEvent verifies that an
+// SSE event whose data: is a tool-call response with PII is emitted
+// with the PII replaced and the original event:/id: lines preserved
+// via canonical re-encode. Surrounding events forward verbatim.
+func TestSSEResponseInspectionMasksToolCallResultEvent(t *testing.T) {
+	presidioServer := createMockPresidioServer(t)
+	defer presidioServer.Close()
+
+	server := NewServer(nil, nil, 0)
+
+	md, err := structpb.NewStruct(map[string]interface{}{
+		"guardrail.provider":                  "presidio-api",
+		"guardrail.mode":                      "post_call",
+		"guardrail.presidio.endpoint":         presidioServer.URL,
+		"guardrail.presidio.language":         "en",
+		"guardrail.presidio.score_thresholds": `{"ALL":"0.5"}`,
+		"guardrail.presidio.entity_actions":   `{"EMAIL_ADDRESS":"MASK"}`,
+	})
+	if err != nil {
+		t.Fatalf("build metadata: %v", err)
+	}
+	metadataCtx := &corev3.Metadata{FilterMetadata: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": md}}
+
+	reqBody := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lookup","arguments":{"q":"hi"}}}`)
+
+	notif := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":50}}\n\n"
+	resultData := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"contact john@example.com please"}]}}`
+	resultEvent := "event: message\nid: 99\ndata: " + resultData + "\n\n"
+	streamBody := []byte(notif + resultEvent)
+
+	requests := []*extprocv3.ProcessingRequest{
+		{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_RequestBody{RequestBody: &extprocv3.HttpBody{Body: reqBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{
+			Headers: &corev3.HeaderMap{Headers: []*corev3.HeaderValue{
+				{Key: ":status", Value: "200"},
+				{Key: "content-type", Value: "text/event-stream"},
+			}},
+		}}, MetadataContext: metadataCtx},
+		{Request: &extprocv3.ProcessingRequest_ResponseBody{ResponseBody: &extprocv3.HttpBody{Body: streamBody, EndOfStream: true}}, MetadataContext: metadataCtx},
+	}
+
+	stream := &mockProcessStream{ctx: context.Background(), requests: requests, sent: []*extprocv3.ProcessingResponse{}}
+	if err := server.Process(stream); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	bodyResp := stream.sent[3].Response.(*extprocv3.ProcessingResponse_ResponseBody)
+	sr := bodyResp.ResponseBody.Response.BodyMutation.Mutation.(*extprocv3.BodyMutation_StreamedResponse).StreamedResponse
+	if !sr.EndOfStream {
+		t.Fatal("EOS = false, want true")
+	}
+
+	// Notification must be present byte-for-byte at the start.
+	if !bytes.HasPrefix(sr.Body, []byte(notif)) {
+		t.Errorf("body does not start with verbatim notification\n got: %q\nwant prefix: %q", sr.Body, notif)
+	}
+	// PII is replaced and the email is gone from the bytes.
+	if bytes.Contains(sr.Body, []byte("john@example.com")) {
+		t.Errorf("body still contains masked email: %q", sr.Body)
+	}
+	// id: 99 from the source event survives the canonical re-encode.
+	if !bytes.Contains(sr.Body, []byte("id: 99\n")) {
+		t.Errorf("body missing source id: 99 line: %q", sr.Body)
+	}
+}
