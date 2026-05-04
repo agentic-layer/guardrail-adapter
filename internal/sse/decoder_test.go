@@ -242,3 +242,35 @@ func TestDecoderFlushPartialUnterminatedLine(t *testing.T) {
 		t.Errorf("ev = %+v, want Name=foo Data=bar", ev)
 	}
 }
+
+func TestDecoderErrEventTooLargeOnFirstWrite(t *testing.T) {
+	d := NewDecoder(8) // very small cap
+	chunk := []byte("data: this is way too long\n\n")
+	events, err := d.Write(chunk)
+	if !errors.Is(err, ErrEventTooLarge) {
+		t.Errorf("err = %v, want ErrEventTooLarge", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("events = %d, want 0", len(events))
+	}
+}
+
+func TestDecoderErrEventTooLargeIsSticky(t *testing.T) {
+	d := NewDecoder(4)
+	if _, err := d.Write([]byte("data: long")); !errors.Is(err, ErrEventTooLarge) {
+		t.Fatalf("first Write err = %v, want ErrEventTooLarge", err)
+	}
+	if _, err := d.Write([]byte("\n\n")); !errors.Is(err, ErrEventTooLarge) {
+		t.Errorf("second Write err = %v, want ErrEventTooLarge", err)
+	}
+	if _, err := d.Flush(); !errors.Is(err, ErrEventTooLarge) {
+		t.Errorf("Flush err = %v, want ErrEventTooLarge", err)
+	}
+}
+
+func TestDecoderUnderCapDoesNotError(t *testing.T) {
+	d := NewDecoder(64)
+	if _, err := d.Write([]byte("data: hi\n\n")); err != nil {
+		t.Errorf("Write err = %v, want nil", err)
+	}
+}
