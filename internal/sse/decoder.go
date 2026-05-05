@@ -59,16 +59,19 @@ func (d *Decoder) Write(chunk []byte) ([]Event, error) {
 		return nil, d.err
 	}
 	d.buf = append(d.buf, chunk...)
-	if d.max > 0 && d.Pending() > d.max {
-		d.err = ErrEventTooLarge
-		return nil, d.err
-	}
 
 	var events []Event
 	for {
 		idx := bytes.IndexByte(d.buf, '\n')
 		if idx < 0 {
 			break
+		}
+		// Check the per-event size cap before moving the line into raw.
+		// This ensures we're checking the current in-progress event size,
+		// not the entire unscanned buffer which may contain multiple events.
+		if d.max > 0 && len(d.raw)+idx+1 > d.max {
+			d.err = ErrEventTooLarge
+			return nil, d.err
 		}
 		// Move bytes up to and including the '\n' from buf into raw.
 		d.raw = append(d.raw, d.buf[:idx+1]...)
@@ -86,6 +89,13 @@ func (d *Decoder) Write(chunk []byte) ([]Event, error) {
 			continue
 		}
 		d.processLine(line)
+	}
+	// After processing all complete lines, check if the in-progress event
+	// (including the unscanned tail) exceeds the per-event cap. This catches
+	// cases where a single event is being built across multiple chunks.
+	if d.max > 0 && d.Pending() > d.max {
+		d.err = ErrEventTooLarge
+		return nil, d.err
 	}
 	return events, nil
 }

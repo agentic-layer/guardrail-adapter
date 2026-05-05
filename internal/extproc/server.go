@@ -282,16 +282,17 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 	chunkBody := body.GetBody()
 	eos := body.GetEndOfStream()
 
-	// Sniff a parser on the first non-empty chunk, regardless of mode.
-	// SelectParser delegates to each parser's CanParse, which (today, for
-	// MCP) requires complete JSON — partial chunks fail. To avoid locking a
-	// stream into pass-through on a truncated first chunk, sniffParser
-	// leaves parserAttempted=false on a NoParserMatchError against a
-	// non-EOS chunk; the assembled buffer at EOS then gets a re-sniff.
-	// The result feeds path selection here AND on the response side
-	// (post_call-only configurations rely on this — see
+	// Sniff a parser on non-empty chunks until a parser is conclusively
+	// identified or ruled out. SelectParser delegates to each parser's
+	// CanParse, which (today, for MCP) requires complete JSON — partial
+	// chunks fail. To avoid locking a stream into pass-through on a
+	// truncated first chunk, sniffParser leaves parserAttempted=false on a
+	// NoParserMatchError against a non-EOS chunk; subsequent chunks (or the
+	// assembled buffer at EOS) can then re-attempt. The result feeds path
+	// selection here AND on the response side (post_call-only
+	// configurations rely on this — see
 	// docs/superpowers/specs/2026-04-30-shared-protocol-parser-design.md).
-	if !state.parserAttempted && !state.requestPathSet && len(chunkBody) > 0 {
+	if !state.parserAttempted && len(chunkBody) > 0 {
 		s.sniffParser(ctx, chunkBody, state, eos)
 	}
 
@@ -333,6 +334,7 @@ func (s *Server) handleRequestBody(ctx context.Context, body *extprocv3.HttpBody
 			slog.Int64("max", s.maxBodySize),
 		)
 		state.requestAborted = true
+		state.requestBuf = nil // Release memory for oversized buffer
 		return s.createOversizeResponse(true, s.maxBodySize)
 	}
 	if !eos {
@@ -548,6 +550,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body *extprocv3.HttpBod
 			slog.Int64("max", s.maxBodySize),
 		)
 		state.responseAborted = true
+		state.responseBuf = nil // Release memory for oversized buffer
 		return s.createOversizeResponse(false, s.maxBodySize)
 	}
 	if !eos {
@@ -767,6 +770,7 @@ func (s *Server) handleSSEOversize(state *streamState) *extprocv3.ProcessingResp
 		slog.Int64("max", s.maxBodySize),
 	)
 	state.responseAborted = true
+	state.sseDec = nil // Release memory for oversized decoder buffers
 	if !state.sseEmitted {
 		return s.createOversizeResponse(false, s.maxBodySize)
 	}
