@@ -60,6 +60,9 @@ func (r *Registry) AddParser(parser Parser) {
 // Preview returns up to n bytes from body, replacing non-printable
 // bytes (outside 0x20-0x7e) with '.' so the result is safe to log.
 func Preview(body []byte, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if len(body) < n {
 		n = len(body)
 	}
