@@ -1,0 +1,242 @@
+// HOW-TO GUIDE — Diátaxis
+// This page answers a goal-shaped question: "how do I do X?"
+// DO: assume context; give concrete steps; link to reference for fields.
+// DON'T: teach concepts; duplicate reference content; include long explanations.
+// If a section drifts into "what is this and why" → move to explanation.adoc.
+// If a section drifts into "exhaustive list of fields/values" → move to reference.adoc.
+// If a section turns into a from-zero walkthrough → move to a tutorial in a showcase repo.
+
+= Deploy the Guardrail Adapter
+
+This guide walks you through deploying the guardrail adapter and connecting it to a gateway so that MCP tool-call traffic is inspected by a guardrail provider.
+
+== Prerequisites
+
+* A Kubernetes cluster with `kubectl` configured, **or** Docker for standalone Envoy usage.
+* Go 1.24+ (if building from source) or a pre-built container image (`ghcr.io/agentic-layer/guardrail-adapter`).
+* A Presidio Analyzer service reachable from the cluster (for the `presidio-api` provider).
+
+== Primary path: managed deployment via tool-gateway-agentgateway
+
+The recommended way to run the adapter is to let the `tool-gateway-agentgateway` operator manage it automatically.
+When you attach a `Guard` to a `ToolGateway`, the operator creates a dedicated adapter `Deployment`, `ConfigMap`, and `Service`, and wires the `AgentgatewayPolicy` `extProc.backendRef` at it — no manual adapter deployment required.
+
+=== Step 1: Install the operator
+
+Follow xref:tool-gateway-agentgateway::how-to-guides/install.adoc[Install the Tool Gateway agentgateway Operator].
+Pass the `--guardrail-adapter-image` flag (already set in the shipped `install.yaml`):
+
+[source,yaml]
+----
+args:
+  - --guardrail-adapter-image=ghcr.io/agentic-layer/guardrail-adapter:latest
+----
+
+=== Step 2: Create a GuardrailProvider and Guard
+
+[source,yaml]
+----
+apiVersion: runtime.agentic-layer.ai/v1alpha1
+kind: GuardrailProvider
+metadata:
+  name: presidio
+  namespace: guardrail-providers
+spec:
+  type: presidio-api
+  presidio:
+    baseUrl: http://presidio.guardrail-providers:80
+---
+apiVersion: runtime.agentic-layer.ai/v1alpha1
+kind: Guard
+metadata:
+  name: pii-guard
+  namespace: guards
+spec:
+  mode:
+    - pre_call
+    - post_call
+  providerRef:
+    name: presidio
+    namespace: guardrail-providers
+  presidio:
+    language: en
+    scoreThresholds:
+      ALL: "0.5"
+    entityActions:
+      EMAIL_ADDRESS: MASK
+      PHONE_NUMBER: MASK
+----
+
+=== Step 3: Attach the Guard to a ToolGateway
+
+[source,yaml]
+----
+apiVersion: runtime.agentic-layer.ai/v1alpha1
+kind: ToolGateway
+metadata:
+  name: tool-gateway
+  namespace: tool-gateway
+spec:
+  toolGatewayClassName: agentgateway
+  guardrails:
+    - name: pii-guard
+      namespace: guards
+----
+
+[source,bash]
+----
+kubectl apply -f guardrailprovider.yaml
+kubectl apply -f guard.yaml
+kubectl apply -f toolggateway.yaml
+----
+
+The operator creates the adapter pod in the Guard's namespace and updates the gateway configuration automatically.
+See xref:agent-runtime-operator:guardrails:how-to-guide.adoc[] for a full cross-gateway walkthrough.
+
+== Standalone deployment with Kubernetes manifests
+
+Use this path when you want to deploy the adapter independently of the operator — for example when wiring it into a vanilla Envoy proxy or when testing a custom guardrail provider.
+
+=== Deploy the adapter
+
+The manifests under `deploy/local/` in the repository ship two variants:
+
+* `deploy/local/dynamic/` — adapter reads guardrail config from Envoy dynamic metadata and `x-guardrail-*` headers at runtime.
+* `deploy/local/static/` — adapter reads config once from a `ConfigMap`-mounted YAML file at startup.
+
+Apply the static variant (recommended for Kubernetes deployments where one pod serves one guardrail configuration):
+
+[source,bash]
+----
+kubectl apply -k deploy/local/static/
+----
+
+This creates:
+
+* A `ConfigMap` named `guardrail-adapter-config` in the `guardrails-static` namespace containing a `config.yaml` that references your Presidio endpoint.
+* A `Deployment` and `Service` for the adapter (port `9001` for gRPC ext_proc, port `8080` for HTTP health).
+
+Edit the `ConfigMap` before applying to point at your Presidio service:
+
+[source,yaml]
+----
+data:
+  config.yaml: |
+    provider: presidio-api
+    modes:
+      - pre_call
+      - post_call
+    presidio:
+      endpoint: http://presidio.my-namespace:80
+      language: en
+      score_thresholds:
+        ALL: "0.5"
+      entity_actions:
+        EMAIL_ADDRESS: MASK
+----
+
+See xref:guardrail-adapter::reference.adoc#static-config-file[Static configuration file] for the full schema.
+
+=== Build from source (optional)
+
+[source,bash]
+----
+git clone https://github.com/agentic-layer/guardrail-adapter.git
+cd guardrail-adapter
+make build          # produces bin/adapter
+./bin/adapter --addr :9001 --health-addr :8080
+----
+
+Or build a Docker image:
+
+[source,bash]
+----
+make docker-build IMG=ghcr.io/agentic-layer/guardrail-adapter:dev
+----
+
+== Wire the adapter into a vanilla Envoy proxy
+
+Configure Envoy's `EnvoyExtensionPolicy` (when using Envoy Gateway) or an `ext_proc` HTTP filter (when using raw Envoy) to point at the adapter's gRPC service.
+
+=== Envoy Gateway: EnvoyExtensionPolicy
+
+[source,yaml]
+----
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: guardrail-extproc
+  namespace: my-namespace
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: my-mcp-route
+  extProc:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: guardrail-adapter
+          port: 9001
+      processingMode:
+        request:
+          body: FullDuplexStreamed
+        response:
+          body: FullDuplexStreamed
+      messageTimeout: 5s
+      failOpen: false
+----
+
+=== Configure a provider
+
+When using the dynamic configuration path, inject `x-guardrail-*` headers from a Lua filter or route metadata:
+
+[cols="2,3"]
+|===
+| Header | Purpose
+
+| `x-guardrail-provider`
+| Provider name. Currently `presidio-api`.
+
+| `x-guardrail-mode`
+| Comma-separated inspection modes: `pre_call`, `post_call`.
+
+| `x-guardrail-presidio-endpoint`
+| Base URL of the Presidio Analyzer service.
+
+| `x-guardrail-presidio-language`
+| ISO language code for text analysis (e.g. `en`).
+
+| `x-guardrail-presidio-score-thresholds`
+| JSON object mapping entity types to minimum confidence scores.
+
+| `x-guardrail-presidio-entity-actions`
+| JSON object mapping entity types to `MASK` or `BLOCK`.
+|===
+
+For the static configuration path, set `GUARDRAIL_CONFIG_FILE` to a mounted YAML file instead (see xref:guardrail-adapter::reference.adoc[]).
+
+== Verify
+
+[source,bash]
+----
+# HTTP health check
+curl http://localhost:8080/health
+# Expected: OK
+
+# Check adapter logs
+kubectl logs -l app=guardrail-adapter -n guardrails-static
+
+# Confirm the gRPC server is up (requires grpcurl)
+grpcurl -plaintext localhost:9001 list
+----
+
+Send a test MCP `tools/call` request through the gateway containing PII.
+The adapter logs a line such as `masked request body replacements=1` and the response body arrives with sensitive spans replaced (e.g. `<EMAIL_ADDRESS>`).
+
+== Related
+
+* xref:guardrail-adapter::reference.adoc[]
+* xref:guardrail-adapter::explanation.adoc[]
+* xref:agent-runtime-operator:guardrails:how-to-guide.adoc[]
+* xref:tool-gateway-agentgateway::how-to-guides/install.adoc[]

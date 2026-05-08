@@ -1,0 +1,259 @@
+// REFERENCE — Diátaxis
+// This page is information-shaped: tables, field lists, full API surface.
+// DO: be exhaustive within scope; use stable, ctrl-F-able structure;
+//     one heading per resource/CRD/command/field group.
+// DON'T: include tutorials, decision trees, or "why" explanations.
+// If a section drifts into "how would you do X" → move to how-to-guide.adoc.
+// If a section drifts into "why this exists" → move to explanation.adoc.
+
+= Guardrail Adapter Reference
+
+This reference covers the binary's CLI flags, environment variables, static configuration file schema, gRPC ext_proc surface, HTTP endpoints, provider interface, and MCP message types handled by the adapter.
+
+== Command-line flags
+
+[cols="1,1,1,3"]
+|===
+| Flag | Type | Default | Description
+
+| `--addr`
+| string
+| `:9001`
+| TCP address for the gRPC ext_proc server. Format: `+host:port+` or `:port` for all interfaces.
+
+| `--health-addr`
+| string
+| `:8080`
+| TCP address for the HTTP health check server.
+
+| `--max-body-size`
+| string
+| `1MiB`
+| Maximum body size buffered per direction (request or response) in the inspection path. Human-readable units are accepted: `512KiB`, `2MiB`, etc. Bodies that exceed this limit are rejected: HTTP 413 for requests, HTTP 502 for responses. Pass-through traffic (no matching guardrail config) is unaffected.
+|===
+
+== Environment variables
+
+[cols="1,1,3"]
+|===
+| Variable | Default | Description
+
+| `GUARDRAIL_CONFIG_FILE`
+| _(unset)_
+| Path to a static YAML configuration file. When set, the file is loaded and validated at startup; invalid files cause a non-zero exit. Dynamic metadata and `x-guardrail-*` headers are ignored for the lifetime of the process. Reloading requires a pod restart.
+
+| `LOG_LEVEL`
+| `info`
+| Log verbosity. Accepted values (case-insensitive): `debug`, `info`, `warn`, `error`. Invalid values fall back to `info` with a warning on stderr.
+
+| `LOG_FORMAT`
+| `text`
+| Log output format. Accepted values (case-insensitive): `text`, `json`. Invalid values fall back to `text` with a warning on stderr. Logs are written to stderr.
+|===
+
+[[static-config-file]]
+== Static configuration file
+
+When `GUARDRAIL_CONFIG_FILE` is set, the adapter reads a YAML file with the following schema.
+All fields are validated at startup; an unknown field or a missing required field causes a non-zero exit.
+
+[source,yaml]
+----
+provider: presidio-api        # required; currently only presidio-api is supported
+modes:                        # required; non-empty list
+  - pre_call                  # inspect outgoing tool-call arguments
+  - post_call                 # inspect incoming tool-call results
+presidio:                     # required when provider: presidio-api
+  endpoint: http://presidio-analyzer:3000   # required; base URL of the Presidio Analyzer service
+  language: en                # optional; ISO language code; default: empty (Presidio default)
+  score_thresholds:           # optional; maps entity type to minimum confidence (0.0–1.0)
+    ALL: "0.5"                # "ALL" is the catch-all; per-entity keys override it
+    EMAIL_ADDRESS: "0.8"
+  entity_actions:             # optional; maps entity type to action
+    EMAIL_ADDRESS: MASK       # MASK: replace with <ENTITY_TYPE> placeholder
+    CREDIT_CARD: BLOCK        # BLOCK: reject the whole request with HTTP 403
+----
+
+=== Modes
+
+[cols="1,3"]
+|===
+| Value | Behaviour
+
+| `pre_call`
+| Inspect outgoing request bodies (MCP `tools/call` arguments) before they reach the upstream tool server. Violations are rejected with HTTP 403.
+
+| `post_call`
+| Inspect incoming response bodies (MCP `tools/call` results) before they reach the caller. Violations are rejected with HTTP 502. Streaming (`text/event-stream`) responses are processed frame-by-frame.
+|===
+
+=== Entity actions (Presidio provider)
+
+[cols="1,3"]
+|===
+| Value | Behaviour
+
+| `ALLOW`
+| Default when no action is configured. Entity is detected but no modification is made.
+
+| `MASK`
+| Replace the detected entity span with a placeholder such as `<EMAIL_ADDRESS>`. Uses Presidio's `/anonymize` endpoint.
+
+| `BLOCK`
+| Reject the entire request or response with an HTTP 403 (request side) or 502 (response side). BLOCK takes precedence over MASK when both match the same entity.
+|===
+
+== ext_proc gRPC surface
+
+The adapter implements the `envoy.service.ext_proc.v3.ExternalProcessor` service defined in the Envoy control-plane API.
+
+=== Service and port
+
+[cols="1,3"]
+|===
+| Item | Value
+
+| gRPC service
+| `envoy.service.ext_proc.v3.ExternalProcessor`
+
+| Default port
+| `9001` (TCP, HTTP/2)
+
+| TLS
+| None (cleartext). Use a service mesh sidecar or Envoy's transport-socket configuration for mTLS.
+
+| gRPC health service
+| `grpc.health.v1.Health` — registered and set to `SERVING` on startup.
+
+| gRPC reflection
+| Enabled (`grpc.reflection.v1alpha`). Supports introspection with `grpcurl` and similar tools.
+|===
+
+=== Implemented RPC
+
+[cols="1,3"]
+|===
+| Method | Description
+
+| `Process(stream ExternalProcessor_ProcessServer) error`
+| Bidirectional streaming RPC. Each `ProcessingRequest` from Envoy receives one `ProcessingResponse`. The adapter handles all six message types in the stream.
+|===
+
+=== ProcessingRequest types handled
+
+[cols="1,3"]
+|===
+| Type | Behaviour
+
+| `RequestHeaders`
+| Resolves the per-stream guardrail configuration from static config, `MetadataContext`, or `x-guardrail-*` headers (in that priority order). Returns an empty `HeadersResponse` (no header mutations at this stage).
+
+| `RequestBody`
+| Buffers body chunks until end-of-stream when `pre_call` inspection is configured and a protocol parser matched the request. Runs parser and provider over the assembled buffer. Emits the original or mutated body as a `StreamedBodyResponse`. Oversized bodies are rejected with HTTP 413.
+
+| `ResponseHeaders`
+| Checks the HTTP status code; non-2xx responses skip body inspection. Activates the frame-aware SSE path for `text/event-stream` responses when `post_call` inspection is configured.
+
+| `ResponseBody`
+| Mirrors request-body behaviour for the response direction. Oversized bodies are rejected with HTTP 502. For `text/event-stream` responses, each SSE frame is inspected individually.
+
+| `RequestTrailers`
+| Returns an empty `TrailersResponse` (pass-through).
+
+| `ResponseTrailers`
+| Returns an empty `TrailersResponse` (pass-through).
+|===
+
+=== Guardrail configuration resolution order
+
+On each new stream, configuration is resolved from the first matching source:
+
+. Static file (`GUARDRAIL_CONFIG_FILE`) — takes precedence when set; dynamic sources are ignored.
+. `MetadataContext.FilterMetadata` — populated when Envoy forwards dynamic metadata.
+. `x-guardrail-*` request headers — fallback injected by a Lua filter via `EnvoyPatchPolicy`.
+
+When no configuration is resolved, all traffic passes through unmodified.
+
+== HTTP endpoints
+
+[cols="1,1,3"]
+|===
+| Method | Path | Description
+
+| `GET`
+| `/health`
+| Returns HTTP 200 with body `OK\n`. Used for Kubernetes readiness and liveness probes (default port `:8080`).
+|===
+
+== Provider interface
+
+A custom guardrail provider must implement the `GuardrailProvider` interface defined in `internal/provider/provider.go`:
+
+[source,go]
+----
+type GuardrailProvider interface {
+    // ProcessRequest analyzes text extracted from a tool-call request.
+    // Returns the (possibly masked) text and optional metadata needed to
+    // process the corresponding response. Returns a non-nil error when the
+    // request must be blocked; the error message is forwarded to the caller
+    // as the block reason.
+    ProcessRequest(ctx context.Context, text string) (*Result, error)
+
+    // ProcessResponse restores processed text using metadata from ProcessRequest.
+    // For example, a masking provider uses this to deanonymize response content
+    // when the request-side metadata records the original spans.
+    ProcessResponse(ctx context.Context, processedText string, metadata interface{}) (string, error)
+}
+----
+
+`Result` carries the processed text and optional provider-specific metadata:
+
+[source,go]
+----
+type Result struct {
+    Text             string      // original or masked text
+    ResponseMetadata interface{} // passed back to ProcessResponse; nil if text was not modified
+}
+----
+
+The built-in `presidio` package in `internal/provider/presidio/` is the reference implementation.
+To add a new provider, implement the interface and register the provider name in `extproc.Server.createProvider`.
+
+== MCP message types parsed
+
+The MCP parser (`internal/protocol/mcpparser/`) recognises JSON-RPC 2.0 messages.
+Only the following MCP method and response shape trigger inspection; all other methods and shapes pass through unmodified.
+
+=== Request side (`pre_call`)
+
+[cols="1,3"]
+|===
+| Method | Extracted text fields
+
+| `tools/call`
+| All string values nested anywhere in `params.arguments`. Each value is extracted with its full JSON path (e.g. `params.arguments.query`, `params.arguments.input[0]`). Non-string leaf values are skipped.
+|===
+
+All other methods (e.g. `tools/list`, `initialize`, notifications) return `shouldInspect=false` and pass through unchanged.
+
+=== Response side (`post_call`)
+
+[cols="1,3"]
+|===
+| Shape | Extracted text fields
+
+| JSON-RPC 2.0 success response whose `result.content` is an array of content items with `type: "text"`
+| The `text` field of each `text`-typed content item, addressed as `result.content[N].text`.
+|===
+
+JSON-RPC error responses (`result.error` present) pass through unchanged.
+
+=== Text replacement
+
+When a provider returns a modified text, the adapter calls `ReplaceTexts` to patch the original JSON body at the recorded paths before forwarding it. The HTTP `content-length` header is removed so Envoy recomputes the correct value from the mutated body.
+
+== Related
+
+* xref:guardrail-adapter::how-to-guide.adoc[]
+* xref:guardrail-adapter::explanation.adoc[]
+* xref:agent-runtime-operator:guardrails:reference.adoc[]

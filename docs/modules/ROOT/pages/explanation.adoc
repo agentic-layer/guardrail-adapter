@@ -1,0 +1,77 @@
+// EXPLANATION — Diátaxis
+// This page is understanding-shaped: "what is this, why, how does it fit?"
+// DO: discuss design choices, alternatives, trade-offs; cross-link to how-to and reference.
+// DON'T: give step-by-step instructions; provide exhaustive field listings.
+// If a section drifts into "how do I do X" → move to how-to-guide.adoc.
+// If a section drifts into "list of all fields" → move to reference.adoc.
+
+= The Guardrail Adapter
+
+== What it is
+
+The guardrail adapter is a Go binary that implements Envoy's External Processing (ext_proc) gRPC protocol.
+It sits between an API gateway and a guardrail engine such as Microsoft Presidio, intercepting MCP tool-call traffic at the HTTP body level.
+On each request the adapter buffers the JSON-RPC body, runs it through a protocol parser to extract inspectable text fields, forwards those fields to the configured guardrail provider, and either passes the (possibly mutated) body downstream or rejects it with an appropriate HTTP error.
+The same process runs symmetrically on response bodies when `post_call` inspection is enabled.
+
+The adapter ships with one built-in provider implementation, `presidio-api`, which calls Presidio's `/analyze`, `/anonymize`, and `/deanonymize` REST endpoints to detect, mask, and optionally restore PII.
+A `GoardrailProvider` interface allows additional providers to be plugged in without touching the ext_proc layer.
+
+== Why it exists
+
+API gateways such as agentgateway and vanilla Envoy are high-performance proxies; they route, load-balance, and observe traffic efficiently.
+They do not speak the proprietary REST APIs of guardrail engines such as Presidio, and adding that coupling directly to the gateway would tie the gateway release cycle to every guardrail provider it needs to support.
+
+The ext_proc protocol is Envoy's designed extension point for exactly this kind of external callout.
+The guardrail adapter is a dedicated microservice that bridges the ext_proc protocol on one side and the guardrail provider's API on the other, keeping both decoupled.
+Gateways remain agnostic about which guardrail engine is in use; the adapter can be upgraded or replaced without touching gateway configuration.
+
+The adapter also addresses a specific gap in the Agentic Layer: MCP traffic consists of JSON-RPC messages with nested argument structures, not flat HTTP bodies.
+A generic ext_proc filter would pass the raw bytes to the provider unchanged.
+The adapter's MCP parser understands which message types carry user-supplied text (`tools/call` arguments, `text`-typed response content items) and which carry protocol overhead (notifications, `tools/list`, etc.), so the provider only ever sees the inspectable text, not the surrounding JSON-RPC envelope.
+
+== How it fits
+
+The adapter is one specific implementation of the guardrail concept owned by `agent-runtime-operator`.
+That operator defines the `GuardrailProvider` and `Guard` CRDs, which express *what* guardrail policy to apply and *where* the guardrail backend lives.
+The concrete mechanism — how that policy reaches the traffic path — is left to each gateway's implementation operator.
+
+For `ToolGateway` resources, the `tool-gateway-agentgateway` operator is the primary consumer.
+When a `Guard` is attached to a `ToolGateway`, the operator creates a dedicated guardrail adapter `Deployment` pre-configured from the `Guard` and its `GuardrailProvider`, and wires the gateway's `AgentgatewayPolicy` `extProc.backendRef` at it.
+One adapter instance runs per guard, so each `ToolGateway` gets an isolated inspection process.
+
+The adapter can also be deployed and wired into a vanilla Envoy proxy independently of the operator layer — for example in development or in an environment that uses Envoy directly rather than through the Agentic Layer operators.
+In that case, guardrail configuration is supplied either as a static YAML file (mounted from a `ConfigMap`) or as per-request `x-guardrail-*` headers injected by a Lua filter.
+
+For the broader guardrail architecture — how `Guard` and `GuardrailProvider` resources relate to gateways and to the guardrail engines they front — see xref:agent-runtime-operator:guardrails:explanation.adoc[].
+For how the `tool-gateway-agentgateway` operator wires the adapter, see xref:tool-gateway-agentgateway::explanation.adoc[].
+
+== Trade-offs and alternatives
+
+=== ext_proc adapter vs. in-gateway plugin
+
+An alternative would be to embed guardrail logic directly in the gateway as a compiled plugin or Lua filter.
+The ext_proc pattern is preferred here because it keeps the guardrail provider's HTTP client, retry logic, and provider-specific data types entirely out of the gateway process.
+The gateway remains a stable binary; the adapter can be updated or replaced by pushing a new container image.
+The cost is a network hop for every inspected body chunk, which adds a small fixed latency to each tool call.
+For the traffic volumes typical of MCP tool-call workloads this latency is acceptable; for very high-throughput scenarios an in-process plugin would be faster.
+
+=== One adapter per provider vs. a fan-out adapter
+
+The current design deploys one adapter instance per `Guard`, which means one adapter per provider configuration.
+An alternative design would be a single adapter that fans out to multiple providers in a chain.
+The one-per-provider model is simpler to reason about (each pod has one responsibility and one set of credentials) and matches the operator's model of deploying one dedicated resource per guard.
+Fan-out could be added in a future provider that delegates to multiple backends, without changing the ext_proc interface.
+
+=== Passthrough mode while infrastructure stabilises
+
+When no guardrail configuration is resolved — because `GUARDRAIL_CONFIG_FILE` is unset and neither dynamic metadata nor `x-guardrail-*` headers are present — the adapter passes all traffic through unchanged.
+This passthrough-by-default behaviour allows the adapter to be deployed ahead of a full guardrail configuration, or to remain in the data path while a guardrail backend is temporarily unavailable, without disrupting tool-call traffic.
+The `failOpen: false` setting in the `EnvoyExtensionPolicy` governs what Envoy does if the adapter itself becomes unreachable; setting it to `false` blocks traffic when the adapter is down.
+
+== Related
+
+* xref:guardrail-adapter::how-to-guide.adoc[]
+* xref:guardrail-adapter::reference.adoc[]
+* xref:agent-runtime-operator:guardrails:explanation.adoc[]
+* xref:tool-gateway-agentgateway::explanation.adoc[]

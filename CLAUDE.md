@@ -4,6 +4,15 @@
 
 Middleware service connecting API gateways (Envoy) with guardrail providers for real-time content moderation and policy enforcement for LLM applications using Envoy's ext_proc protocol.
 
+## User Guides and How-To Guides
+
+- @docs/modules/ROOT/pages/how-to-guide.adoc
+
+## Reference Documentation
+
+- @docs/modules/ROOT/pages/reference.adoc
+- Overall Agentic Layer Architecture: https://docs.agentic-layer.ai/architecture/main/index.html
+
 ## Essential Commands
 
 ```bash

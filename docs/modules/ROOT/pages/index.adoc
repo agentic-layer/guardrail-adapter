@@ -1,0 +1,15 @@
+= Guardrail Adapter
+
+The guardrail adapter bridges API gateways to guardrail providers using Envoy's External Processing (ext_proc) API.
+It intercepts MCP tool-call traffic in real time and applies content moderation, PII masking, or policy enforcement without modifying the agents or tool servers on either side.
+
+The adapter is one provider implementation in the Agentic Layer guardrail story.
+Platform teams typically deploy it automatically through the `tool-gateway-agentgateway` operator, which creates and wires a dedicated adapter instance for each `Guard` resource attached to a `ToolGateway`.
+It can also be wired into a vanilla Envoy proxy independently of the operator layer.
+For the broader guardrail architecture see xref:agent-runtime-operator:guardrails:explanation.adoc[].
+
+== Pages
+
+* xref:guardrail-adapter::how-to-guide.adoc[] — deploy the adapter and connect it to a gateway
+* xref:guardrail-adapter::reference.adoc[] — CLI flags, gRPC surface, HTTP endpoints, provider interface
+* xref:guardrail-adapter::explanation.adoc[] — design rationale, trade-offs, and how the adapter fits the Agentic Layer
