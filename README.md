@@ -1,257 +1,67 @@
-# guardrail-adapter
+# Guardrail Adapter
 
-The guardrail adapter connects gateways with guardrail providers using Envoy's External Processing (ext_proc) API.
+The guardrail adapter is a middleware service that connects API gateways with guardrail providers via Envoy's External Processing (ext_proc) API. It inspects MCP tool-call traffic and applies content moderation, PII masking, or policy enforcement before the request reaches the upstream tool server.
 
-## Overview
+📖 **Documentation:** https://docs.agentic-layer.ai/guardrail-adapter/
 
-The guardrail-adapter acts as a bridge between API gateways (like Envoy) and various guardrail providers, enabling real-time content moderation, safety checks, and policy enforcement for LLM applications. It implements Envoy's External Processing protocol to intercept and process requests and responses.
-
-### Architecture
-
-The adapter consists of three main components:
-
-1. **ext_proc Server**: Implements Envoy's External Processing gRPC protocol to handle request/response interception
-2. **MCP Parser**: Parses and validates Model Context Protocol (MCP) messages for guardrail evaluation
-3. **Provider Interface**: Extensible interface for integrating with various guardrail providers
-
-The adapter operates in passthrough mode by default, allowing traffic to flow while infrastructure is established. Future implementations will add actual guardrail evaluation logic.
-
-## Building and Running
+## Development
 
 ### Prerequisites
 
-- Go 1.24 or later
-- Docker (optional, for containerized deployment)
-- Make
+- **Go** 1.24+
+- **Docker** (with Docker Compose)
+- **make**
+- **curl**, and optionally [grpcurl](https://github.com/fullstorydev/grpcurl)
+- For the Envoy Gateway E2E path: a local Kubernetes cluster, [Tilt](https://tilt.dev/) v0.33+, **helm**, **kubectl**, **jq**
 
-### Build from Source
+**Tip:** [mise](https://mise.jdx.dev/) pins every tool to the version this repo uses. Run `mise install`.
 
-```bash
+### Build and run
+
+```shell
 # Build the binary
 make build
-
-# The binary will be in bin/adapter
-./bin/adapter --help
+# Run directly with default settings
+make run
 ```
 
-### Run Tests
+The adapter listens on `:9001` (gRPC ext_proc) and `:8080` (HTTP health). See the [reference docs](https://docs.agentic-layer.ai/guardrail-adapter/reference.html) for flags, environment variables, and the static config file schema.
 
-```bash
-# Run all tests with coverage
-make test
+### Test
 
-# Run linting
-make lint
-
-# Auto-fix linting issues
-make lint-fix
-
-# Format code
-make fmt
-
-# Run go vet
-make vet
+```shell
+make lint       # linting (use `make lint-fix` to auto-fix)
+make fmt        # format
+make vet        # go vet
+make test       # unit tests with coverage
 ```
 
-### End-to-End Testing
+### Verify with end-to-end tests
 
-The project includes end-to-end tests that verify the adapter working with Presidio guardrail services. The e2e tests use Docker Compose to orchestrate all required services.
+Two E2E paths exercise the adapter against real services.
 
-#### Prerequisites for E2E Tests
+**Docker Compose** — adapter + Presidio + echo MCP server, no Kubernetes required:
 
-- Docker and Docker Compose
-- `curl` (for HTTP requests)
-- `grpcurl` (optional, for gRPC health checks) - Install from https://github.com/fullstorydev/grpcurl
-
-#### Running E2E Tests Locally
-
-1. Start all services using Docker Compose:
-
-    ```bash
-    docker compose up -d
-    ```
-
-2. Then run the e2e test script:
-
-    ```bash
-    ./test/e2e.sh
-    ```
-
-3. View service logs if tests fail:
-
-    ```bash
-    # View all service logs
-    docker compose logs
-    ```
-
-4. Stop and clean up services:
-
-    ```bash
-    docker compose down
-    ```
-
-#### E2E via Envoy Gateway (Tilt)
-
-A second E2E path exercises the adapter through a real Envoy data plane
-fronted by Envoy Gateway (Kubernetes Gateway API). Unlike the Docker
-Compose path, this validates the full ext_proc wiring against production-
-shape infrastructure.
-
-Prerequisites:
-- A local Kubernetes cluster (kind, Docker Desktop, Colima, etc.) and
-  `kubectl` pointing at it
-- [Tilt](https://tilt.dev/) v0.33+, `helm`, `kubectl`, and Docker
-- `curl` and `jq`
-
-**Tip:** Install all required tools with pinned versions using [mise](https://mise.jdx.dev/):
-```bash
-mise install
+```shell
+# Start the stack
+docker compose up -d
+# Run the test script
+./test/e2e.sh
+# Tear down
+docker compose down
 ```
 
-See `.mise.toml` for the pinned tool versions.
+**Envoy Gateway via Tilt** — full Kubernetes Gateway API wiring (kind, Docker Desktop, Colima, ...):
 
-Run the stack:
-
-```bash
+```shell
+# Install Envoy Gateway, Presidio, echo-mcp-server, the adapter, and the
+# Gateway / HTTPRoute / EnvoyExtensionPolicy / EnvoyPatchPolicy manifests
 tilt up
-```
-
-Tilt installs Envoy Gateway v1.7.2, deploys Presidio, echo-mcp-server,
-the guardrail-adapter (built from local sources), plus the Gateway,
-HTTPRoute, EnvoyExtensionPolicy, and EnvoyPatchPolicy manifests. Once
-all resources are green it forwards the Envoy data-plane port to
-`localhost:10000`.
-
-Then run the test script:
-
-```bash
+# Run the test script (sends an MCP tools/call with a PII payload and asserts
+# the adapter masked the email)
 ./test/e2e-gateway.sh
 ```
 
-The script sends an MCP `tools/call` for the `echo` tool with a PII
-payload (`"My email is john@example.com"`) through the gateway. It
-asserts that the adapter masked the email (`<EMAIL_ADDRESS>` appears
-in the response and the raw email does not).
+## Contributing
 
-Notes:
-- Guardrail configuration is delivered via `x-guardrail-*` request
-  headers set by a Lua filter injected via `EnvoyPatchPolicy`. This is
-  a workaround: Envoy's `forwarding_namespaces` forwards dynamic
-  metadata, not route `filter_metadata`, so route-level metadata alone
-  does not reach the ext_proc server.
-- `EnvoyPatchPolicy` is experimental in Envoy Gateway and its patch
-  paths (Listener filter chain, RouteConfiguration virtual hosts) are
-  sensitive to version bumps.
-
-### Run the Adapter
-
-```bash
-# Run directly with default settings
-make run
-
-# Or run the binary with custom flags
-./bin/adapter --addr :9001 --health-addr :8080
-```
-
-### Configuration Flags
-
-- `--addr`: Address for the gRPC ext_proc server (default: `:9001`)
-- `--health-addr`: Address for the HTTP health check server (default: `:8080`)
-
-### Static Configuration (ConfigMap-friendly)
-
-The adapter can alternatively be configured via a YAML file loaded once at
-startup, bypassing the dynamic metadata / `EnvoyPatchPolicy` workaround.
-This is the recommended path for Kubernetes deployments where one pod
-serves a single guardrail+provider combination.
-
-Set `GUARDRAIL_CONFIG_FILE` to the path of a YAML file with the following
-schema:
-
-```yaml
-provider: presidio-api       # required
-modes:                       # required, non-empty list: pre_call | post_call
-  - pre_call
-  - post_call
-presidio:                    # required when provider: presidio-api
-  endpoint: http://presidio-analyzer:3000
-  language: en               # optional
-  score_thresholds:          # optional
-    EMAIL_ADDRESS: 0.5
-  entity_actions:            # optional
-    EMAIL_ADDRESS: MASK
-```
-
-When `GUARDRAIL_CONFIG_FILE` is set:
-- the file is loaded and validated at startup; any error exits non-zero,
-- dynamic metadata (`MetadataContext`) and `x-guardrail-*` headers are
-  ignored,
-- reloading requires restarting the pod (e.g. via a ConfigMap checksum
-  annotation on the Pod template).
-
-When `GUARDRAIL_CONFIG_FILE` is unset or empty, the adapter falls back to
-the dynamic metadata path (with `x-guardrail-*` header fallback) described
-above.
-
-## Docker Usage
-
-### Build Docker Image
-
-```bash
-# Build with default tag
-make docker-build
-
-# Build with custom tag
-make docker-build IMG=ghcr.io/agentic-layer/guardrail-adapter:v0.1.0
-```
-
-### Build Multi-Platform Image
-
-```bash
-# Build and push for linux/amd64 and linux/arm64
-make docker-buildx IMG=ghcr.io/agentic-layer/guardrail-adapter:v0.1.0
-```
-
-### Run with Docker
-
-```bash
-# Pull and run the latest image
-docker run -p 9001:9001 -p 8080:8080 ghcr.io/agentic-layer/guardrail-adapter:latest
-
-# Run with custom configuration
-docker run -p 9001:9001 -p 8080:8080 \
-  ghcr.io/agentic-layer/guardrail-adapter:latest \
-  --addr :9001 --health-addr :8080
-```
-
-### Health Checks
-
-The adapter exposes a health check endpoint on the HTTP server:
-
-```bash
-curl http://localhost:8080/health
-# Returns: OK
-```
-
-## CI/CD
-
-The project uses GitHub Actions for continuous integration:
-
-- **Lint**: Runs on all PRs and pushes to main/renovate branches
-- **Test**: Executes unit test suite with coverage reporting
-- **E2E**: Runs end-to-end tests with Docker Compose and Presidio services
-- **Publish**: Builds and publishes multi-platform Docker images to GitHub Container Registry
-
-Images are automatically published on:
-- Push to main branch (tagged as `latest` and branch name)
-- Git tags matching `v*.*.*` (tagged with semver patterns)
-- Pull requests (tagged with PR number)
-
-## License
-
-See [LICENSE](LICENSE) for details.
-
-## Links
-
-- [Design Specification](https://github.com/agentic-layer/guardrail-adapter/issues) - Detailed design and architecture
-- [Implementation Plan](https://github.com/agentic-layer/guardrail-adapter/issues) - Development roadmap
+See the [Contribution Guide](https://github.com/agentic-layer/guardrail-adapter?tab=contributing-ov-file).
