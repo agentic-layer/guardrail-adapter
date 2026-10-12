@@ -3,7 +3,7 @@ module github.com/agentic-layer/guardrail-adapter
 go 1.25.0
 
 require (
-	github.com/dustin/go-humanize v1.0.1
+	github.com/dustin/go-humanize v1.1.0
 	github.com/envoyproxy/go-control-plane/envoy v1.39.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
